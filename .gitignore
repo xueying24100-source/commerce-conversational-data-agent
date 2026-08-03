@@ -45,6 +45,9 @@ NUL
 # local git history backup (never publish)
 .git-old-backup/
 
+# personal interview prep notes (never publish)
+docs/INTERVIEW_GUIDE.md
+
 # generated caches
 *.tsbuildinfo
 .eslintcache

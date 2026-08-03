@@ -1,0 +1,67 @@
+groups:
+  - name: commerce-data-agent
+    rules:
+      - alert: CommerceAgentWorkerUnavailable
+        expr: max_over_time(commerce_agent_workers[2m]) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commerce Data Agent has no active Worker
+          description: No Worker heartbeat has been visible for at least two minutes.
+
+      - alert: CommerceAgentQueueStalled
+        expr: commerce_agent_queue_oldest_seconds > 180
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commerce Data Agent queue is stalled
+          description: The oldest queued Job has waited more than three minutes.
+
+      - alert: CommerceAgentQueueBacklog
+        expr: commerce_agent_queue_depth > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce Data Agent queue backlog is elevated
+          description: More than 20 durable Jobs have remained queued for ten minutes.
+
+      - alert: CommerceAgentDeadLetterPresent
+        expr: commerce_agent_jobs{status="dead_letter"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce Data Agent has dead-letter Jobs
+          description: At least one retryable Job exhausted all configured attempts.
+
+      - alert: CommerceConnectorLatestRunFailed
+        expr: commerce_connector_last_run_status{status="failed"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commerce Connector latest run failed
+          description: The latest run for tenant {{ $labels.tenant_id }} connector {{ $labels.connector_id }} failed.
+
+      - alert: CommerceIncrementalConnectorStale
+        expr: time() - commerce_connector_last_success_timestamp_seconds{transport=~"shopify|https"} > 93600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce incremental Connector is stale
+          description: Tenant {{ $labels.tenant_id }} connector {{ $labels.connector_id }} has not succeeded for more than 26 hours.
+
+      - alert: CommerceConnectorRejectRatioHigh
+        expr: |
+          commerce_connector_rows{kind="rejected"}
+          / ignoring(kind) commerce_connector_rows{kind="source"} > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce Connector rejected-row ratio is high
+          description: Tenant {{ $labels.tenant_id }} connector {{ $labels.connector_id }} rejected more than 1% of source rows.

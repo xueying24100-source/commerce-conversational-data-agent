@@ -1,0 +1,64 @@
+# Render this template with the deployment secret store before loading Nginx.
+# The auth service must return X-Auth-Request-User, X-Auth-Request-Name and
+# X-Auth-Request-Tenant and X-Auth-Request-Scopes only after a successful
+# SSO/OIDC session and Commerce entitlement check.
+
+upstream commerce_data_agent {
+  server ${COMMERCE_APP_UPSTREAM};
+  keepalive 32;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name ${COMMERCE_PUBLIC_HOST};
+  client_max_body_size 24k;
+
+  ssl_certificate     ${TLS_CERTIFICATE_PATH};
+  ssl_certificate_key ${TLS_PRIVATE_KEY_PATH};
+
+  # Platform probes call the private container/service address directly.
+  # Do not publish operational probes through the user-facing ingress.
+  location = /api/health { return 404; }
+  location = /api/health/ready { return 404; }
+  location = /api/metrics { return 404; }
+
+  location = /_auth_check {
+    internal;
+    proxy_pass ${AUTH_REQUEST_UPSTREAM};
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Original-URI $request_uri;
+    proxy_set_header Cookie $http_cookie;
+  }
+
+  location / {
+    # Never forward caller-supplied identity headers. Values below come only
+    # from the internal auth_request response and deployment secret.
+    proxy_set_header x-commerce-tenant-id "";
+    proxy_set_header x-commerce-user-id "";
+    proxy_set_header x-commerce-user-name "";
+    proxy_set_header x-commerce-scopes "";
+    proxy_set_header x-commerce-proxy-secret "";
+
+    auth_request /_auth_check;
+    auth_request_set $commerce_user $upstream_http_x_auth_request_user;
+    auth_request_set $commerce_name $upstream_http_x_auth_request_name;
+    auth_request_set $commerce_tenant $upstream_http_x_auth_request_tenant;
+    auth_request_set $commerce_scopes $upstream_http_x_auth_request_scopes;
+
+    proxy_set_header x-commerce-tenant-id $commerce_tenant;
+    proxy_set_header x-commerce-user-id $commerce_user;
+    proxy_set_header x-commerce-user-name $commerce_name;
+    proxy_set_header x-commerce-scopes $commerce_scopes;
+    proxy_set_header x-commerce-proxy-secret "${COMMERCE_TRUSTED_PROXY_SECRET}";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+    proxy_connect_timeout 10s;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+    proxy_http_version 1.1;
+    proxy_pass http://commerce_data_agent;
+  }
+}

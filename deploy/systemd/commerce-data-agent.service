@@ -1,0 +1,34 @@
+[Unit]
+Description=Commerce Conversational Data Agent
+After=network-online.target
+Wants=network-online.target commerce-data-agent-worker.service
+
+[Service]
+Type=simple
+User=commerce
+Group=commerce
+WorkingDirectory=/opt/commerce-data-agent/current
+EnvironmentFile=/etc/commerce-data-agent/commerce-agent.env
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/env node scripts/runtime/production-env.js
+ExecStart=/usr/bin/env node .next/standalone/server.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

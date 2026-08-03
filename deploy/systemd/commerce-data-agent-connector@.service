@@ -1,0 +1,20 @@
+[Unit]
+Description=Commerce Data Connector %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=commerce
+Group=commerce
+WorkingDirectory=/opt/commerce-data-agent/current
+EnvironmentFile=/etc/commerce-data-agent/commerce-jobs.env
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node scripts/connectors/run-commerce-connector.js /etc/commerce-data-agent/connectors/%i.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/commerce-data-agent/connectors
+

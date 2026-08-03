@@ -1,0 +1,31 @@
+name: commerce-data-agent
+
+x-commerce-service: &commerce-service
+  image: commerce-data-agent:${COMMERCE_IMAGE_TAG:-local}
+  build:
+    context: .
+    args:
+      COMMERCE_RELEASE_REVISION: ${COMMERCE_RELEASE_REVISION:?set COMMERCE_RELEASE_REVISION}
+  env_file:
+    - path: ${COMMERCE_ENV_FILE:-.env.production}
+      required: true
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 3m
+
+services:
+  web:
+    <<: *commerce-service
+    command: ["node", "scripts/runtime/start-commerce.js"]
+    ports:
+      - "127.0.0.1:${COMMERCE_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    <<: *commerce-service
+    command: ["node", "scripts/runtime/commerce-worker.js"]

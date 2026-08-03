@@ -1,0 +1,19 @@
+[Unit]
+Description=Commerce Data Agent retention cleanup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=commerce
+Group=commerce
+WorkingDirectory=/opt/commerce-data-agent/current
+EnvironmentFile=/etc/commerce-data-agent/commerce-jobs.env
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node scripts/db/cleanup-commerce.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Commerce Data Agent retention cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=10m
+Unit=commerce-data-agent-cleanup.service
+
+[Install]
+WantedBy=timers.target
