@@ -1,0 +1,73 @@
+name: Commerce Operations Data Agent Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  commerce-agent:
+    name: Commerce Data Agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Commerce boundary
+        run: npm run check:boundary
+
+      - name: Release asset contract
+        run: npm run check:release-assets
+
+      - name: Build
+        run: npm run build
+
+  postgres-integration:
+    name: PostgreSQL production invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: commerce_integration
+          POSTGRES_USER: commerce_test_admin
+          POSTGRES_PASSWORD: commerce_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U commerce_test_admin -d commerce_integration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      COMMERCE_TEST_DATABASE_URL: postgresql://commerce_test_admin:commerce_test_password@127.0.0.1:5432/commerce_integration
+      COMMERCE_TEST_DATABASE_CONFIRM: commerce-integration
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:integration:commerce

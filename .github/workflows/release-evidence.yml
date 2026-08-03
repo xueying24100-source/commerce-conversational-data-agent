@@ -1,0 +1,71 @@
+name: Commerce Release Evidence Gate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  workflow_call:
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commerce-release-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: commerce_release
+          POSTGRES_USER: commerce_test_admin
+          POSTGRES_PASSWORD: commerce_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U commerce_test_admin -d commerce_release"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      COMMERCE_TEST_DATABASE_URL: postgresql://commerce_test_admin:commerce_test_password@127.0.0.1:5432/commerce_release
+      COMMERCE_TEST_DATABASE_CONFIRM: commerce-integration
+      COMMERCE_LIVE_E2E_DATABASE_URL: postgresql://commerce_test_admin:commerce_test_password@127.0.0.1:5432/commerce_release
+      COMMERCE_LIVE_E2E_CONFIRM: commerce-live-e2e
+      COMMERCE_LIVE_E2E_MODEL: deepseek-v4-flash
+      COMMERCE_RELEASE_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Require release credential
+        shell: bash
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY is required; release evidence cannot be skipped."
+            exit 1
+          fi
+      - name: Run complete release evidence gate
+        run: npm run release:check:evidence
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: commerce-release-evidence-${{ github.run_id }}-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            tmp/commerce-release/
+            tmp/commerce-live-e2e/

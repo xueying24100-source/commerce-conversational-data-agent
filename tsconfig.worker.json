@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "ES2022",
+    "outDir": ".next/commerce-worker",
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false,
+    "isolatedModules": false
+  },
+  "include": [
+    "src/workers/commerce-agent-worker.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tmp",
+    ".next"
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "services": [
+    {
+      "id": "commerce-web",
+      "runtime": "node",
+      "kind": "application",
+      "command": "node scripts/runtime/start-commerce.js",
+      "liveness": "/api/health",
+      "readiness": "/api/health/ready",
+      "dependencies": ["commerce-control-db", "commerce-analytics-db", "model-provider", "commerce-worker"]
+    },
+    {
+      "id": "commerce-worker",
+      "runtime": "node",
+      "kind": "worker",
+      "command": "node scripts/runtime/commerce-worker.js",
+      "readinessSignal": "commerce_agent_workers.heartbeat_at",
+      "dependencies": ["commerce-control-db", "commerce-analytics-db", "model-provider"]
+    },
+    {
+      "id": "commerce-connector",
+      "runtime": "node",
+      "kind": "batch",
+      "command": "node scripts/connectors/run-commerce-connector.js <config.json>",
+      "auditTable": "commerce_connector_runs",
+      "dependencies": ["commerce-analytics-db"]
+    },
+    {
+      "id": "commerce-control-db",
+      "runtime": "postgresql",
+      "kind": "database",
+      "env": "COMMERCE_DATABASE_URL",
+      "migration": "migrations/commerce-control.sql"
+    },
+    {
+      "id": "commerce-analytics-db",
+      "runtime": "postgresql",
+      "kind": "database",
+      "env": "COMMERCE_ANALYTICS_DATABASE_URL",
+      "migration": "migrations/commerce-analytics.sql"
+    },
+    {
+      "id": "model-provider",
+      "runtime": "https",
+      "kind": "external",
+      "credentials": ["MODELPORT_API_KEY", "DEEPSEEK_API_KEY"]
+    },
+    {
+      "id": "prometheus-scrape",
+      "runtime": "http",
+      "kind": "observability",
+      "endpoint": "/api/metrics",
+      "credential": "COMMERCE_METRICS_TOKEN"
+    }
+  ]
+}

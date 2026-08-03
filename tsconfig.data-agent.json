@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": [
+    "next-env.d.ts",
+    "src/app/**/*.ts",
+    "src/app/**/*.tsx",
+    "src/proxy.ts",
+    "src/proxy.test.ts",
+    "src/contexts/ThemeContext.tsx",
+    "src/lib/domains/commerce/**/*.ts",
+    "src/workers/**/*.ts",
+    "src/lib/agent/context/**/*.ts",
+    "src/lib/agent/core/**/*.ts",
+    "src/lib/agent/providers/**/*.ts",
+    "src/lib/config/llm.ts",
+    "src/lib/constants/**/*.ts",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "data/projects",
+    "tmp",
+    ".next/dev"
+  ]
+}
