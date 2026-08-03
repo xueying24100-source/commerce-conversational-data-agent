@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "connectorId": "orders-daily-jsonl",
+  "connectorVersion": "1.0.0",
+  "tenantId": "tenant_acme",
+  "format": "jsonl",
+  "maxRows": 1000000,
+  "maxBytes": 100000000,
+  "source": {
+    "type": "file",
+    "path": "../data/commerce-daily-metrics.jsonl"
+  },
+  "fieldMap": {
+    "metric_date": "metric_date",
+    "region": "region",
+    "channel": "channel",
+    "sku": "sku",
+    "category": "category",
+    "visits": "visits",
+    "paid_orders": "paid_orders",
+    "units": "units",
+    "gmv": "gmv",
+    "refund_orders": "refund_orders",
+    "refund_amount": "refund_amount",
+    "cost_amount": "cost_amount",
+    "ad_spend": "ad_spend",
+    "new_customers": "new_customers",
+    "stockout_hours": "stockout_hours",
+    "ending_inventory": "ending_inventory",
+    "source_updated_at": "source_updated_at"
+  }
+}

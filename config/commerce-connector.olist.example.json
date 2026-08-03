@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "connectorId": "olist-public-orders",
+  "connectorVersion": "1.0.0",
+  "tenantId": "tenant_olist_demo",
+  "maxRows": 100000,
+  "maxBytes": 100000000,
+  "source": {
+    "type": "olist",
+    "datasetRevision": "d9e49802f3e92d09ee94ab9ccc5e457f207a8959",
+    "businessTimeZone": "America/Sao_Paulo",
+    "snapshotUpdatedAt": "2018-10-17T20:30:18.000Z",
+    "timeoutMs": 120000,
+    "maxRetries": 4,
+    "maxRetryDelayMs": 30000,
+    "maxSourceRows": 500000,
+    "maxRejectedRows": 10,
+    "channel": "Olist Marketplace",
+    "orderSku": "OLIST-ORDER",
+    "orderCategory": "All Products"
+  }
+}

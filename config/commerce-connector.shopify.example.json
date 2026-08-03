@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "connectorId": "shopify-orders",
+  "connectorVersion": "1.0.0",
+  "tenantId": "tenant_local",
+  "maxRows": 1000000,
+  "maxBytes": 100000000,
+  "source": {
+    "type": "shopify",
+    "shopDomainEnv": "SHOPIFY_SHOP_DOMAIN",
+    "accessTokenEnv": "SHOPIFY_ADMIN_ACCESS_TOKEN",
+    "apiVersion": "2026-07",
+    "initialUpdatedAt": "2026-07-01T00:00:00.000Z",
+    "businessTimeZone": "Asia/Shanghai",
+    "pageSize": 50,
+    "maxPages": 1000,
+    "timeoutMs": 30000,
+    "maxRetries": 4,
+    "maxRetryDelayMs": 30000,
+    "defaultRegion": "Unknown",
+    "defaultChannel": "Shopify",
+    "orderSku": "SHOPIFY-ORDER",
+    "orderCategory": "All Products"
+  }
+}
