@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "modules": [
+    {
+      "id": "commerce-web",
+      "owner": "commerce-product",
+      "paths": ["src/app/**", "src/contexts/**", "src/styles/**", "src/proxy.ts"],
+      "dependsOn": ["commerce-agent"]
+    },
+    {
+      "id": "commerce-agent",
+      "owner": "commerce-data",
+      "paths": ["src/lib/domains/commerce/**", "src/workers/**"],
+      "dependsOn": ["agent-runtime"]
+    },
+    {
+      "id": "agent-runtime",
+      "owner": "agent-platform",
+      "paths": [
+        "src/lib/agent/context/**",
+        "src/lib/agent/core/**",
+        "src/lib/agent/providers/**",
+        "src/lib/agent/types.ts",
+        "src/lib/config/llm.ts",
+        "src/lib/constants/models.ts"
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "commerce-connectors",
+      "owner": "commerce-data",
+      "paths": ["scripts/connectors/**", "scripts/db/**", "migrations/**"],
+      "dependsOn": []
+    },
+    {
+      "id": "commerce-operations",
+      "owner": "commerce-operations",
+      "paths": ["deploy/**", "scripts/runtime/**", "scripts/checks/**"],
+      "dependsOn": ["commerce-web", "commerce-agent", "commerce-connectors"]
+    }
+  ],
+  "forbiddenPaths": [
+    "src/lib/domains/finance/**",
+    "src/lib/quant/**",
+    "src/lib/eval/**",
+    "services/market-data/**",
+    "prisma/**",
+    "benchmarks/**",
+    "sqls/**",
+    ".moagent/**"
+  ],
+  "rules": [
+    {
+      "from": "src/lib/agent/**",
+      "forbid": "src/lib/domains/**",
+      "reason": "The reusable runtime cannot depend on a business domain."
+    },
+    {
+      "from": "src/lib/domains/commerce/**",
+      "forbid": "src/app/**",
+      "reason": "Commerce domain logic cannot depend on Next.js routes or UI."
+    },
+    {
+      "from": "src/app/**",
+      "forbid": "scripts/**",
+      "reason": "Request handling cannot import deployment or maintenance scripts."
+    }
+  ]
+}
