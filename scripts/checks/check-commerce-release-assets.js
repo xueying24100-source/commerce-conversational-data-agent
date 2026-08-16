@@ -7,8 +7,11 @@ const root = path.join(__dirname, '..', '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const scripts = new Set(Object.keys(packageJson.scripts || {}));
 const requiredFiles = [
+  '.editorconfig',
+  '.gitattributes',
   '.node-version',
   '.nvmrc',
+  '.env.example',
   '.env.production.example',
   '.env.release.example',
   'Dockerfile',
@@ -26,21 +29,27 @@ const requiredFiles = [
   'config/commerce-connector.olist.example.json',
   'config/commerce-connector.shopify.example.json',
   'docs/async-execution.md',
+  'docs/acceptance-status.md',
   'docs/connectors.md',
   'docs/e2e.md',
+  'docs/interview-guide.md',
   'docs/observability.md',
+  'docs/repository-layout.md',
   'docs/release-runbook.md',
+  'contracts/README.md',
   'contracts/commerce-data-contract/v1/contract.json',
   'contracts/commerce-data-contract/v1/source-manifest.json',
   'contracts/commerce-data-contract/v1/fixture-manifest.json',
   'quality/commerce-agent-eval/v1/hash-lock.json',
   'quality/commerce-agent-eval/v1/dev-manifest.json',
   'quality/commerce-agent-eval/v1/final-manifest.json',
+  'quality/README.md',
   'quality/commerce-agent-feishu-sandbox/v1/README.md',
   'quality/commerce-agent-usability/v1/README.md',
   'migrations/commerce-analytics.sql',
   'migrations/commerce-control.sql',
   'scripts/checks/release-commerce.js',
+  'scripts/checks/check-next-env-isolation.js',
   'scripts/checks/smoke-commerce-image.js',
   'scripts/checks/smoke-commerce-image.test.mjs',
   'scripts/checks/run-commerce-live-e2e.js',
@@ -74,12 +83,65 @@ const requiredFiles = [
 const workflowDirectory = path.join(root, '.github', 'workflows');
 const errors = [];
 const workflowSources = new Map();
+const ignoredMarkdownDirectories = new Set([
+  '.git',
+  '.git-old-backup',
+  '.next',
+  '.claude',
+  '.vscode',
+  'coverage',
+  'data',
+  'node_modules',
+  'playwright-report',
+  'test-results',
+  'tmp',
+]);
+
+function collectMarkdownFiles(directory) {
+  const result = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && ignoredMarkdownDirectories.has(entry.name)) continue;
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) result.push(...collectMarkdownFiles(absolutePath));
+    else if (entry.isFile() && entry.name.endsWith('.md')) result.push(absolutePath);
+  }
+  return result;
+}
+
+function checkLocalMarkdownLinks() {
+  let checked = 0;
+  const markdownLink = /!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+["'][^)]*["'])?\)/gu;
+  for (const markdownPath of collectMarkdownFiles(root)) {
+    const source = fs.readFileSync(markdownPath, 'utf8');
+    for (const match of source.matchAll(markdownLink)) {
+      const rawTarget = match[1].replace(/^<|>$/gu, '');
+      if (/^(?:#|https?:|mailto:|data:|\/)/u.test(rawTarget)) continue;
+      let decodedTarget;
+      try {
+        decodedTarget = decodeURIComponent(rawTarget.split('#', 1)[0].split('?', 1)[0]);
+      } catch {
+        errors.push(`${path.relative(root, markdownPath)} has invalid link encoding: ${rawTarget}`);
+        continue;
+      }
+      const resolved = path.resolve(path.dirname(markdownPath), decodedTarget);
+      checked += 1;
+      if (!fs.existsSync(resolved)) {
+        errors.push(
+          `${path.relative(root, markdownPath)} references missing local link: ${rawTarget}`,
+        );
+      }
+    }
+  }
+  return checked;
+}
 
 for (const relativePath of requiredFiles) {
   if (!fs.existsSync(path.join(root, relativePath))) {
     errors.push(`missing release asset: ${relativePath}`);
   }
 }
+
+const checkedMarkdownLinks = checkLocalMarkdownLinks();
 
 for (const filename of fs.readdirSync(workflowDirectory)) {
   if (!filename.endsWith('.yml') && !filename.endsWith('.yaml')) continue;
@@ -165,6 +227,9 @@ if (!scripts.has('db:restore-evidence:commerce')) {
 if (!scripts.has('check:external-evidence:commerce')) {
   errors.push('package.json must expose check:external-evidence:commerce.');
 }
+if (!scripts.has('check:next-env-isolation')) {
+  errors.push('package.json must expose check:next-env-isolation.');
+}
 for (const requiredScript of [
   'check:commerce-eval-assets',
   'test:commerce-eval',
@@ -181,6 +246,7 @@ for (const requiredText of [
   'role-capabilities-report.json',
   'restore-drill-report.json',
   "COMMERCE_DISABLE_LOCAL_ENV_FILES: '1'",
+  "__NEXT_PROCESSED_ENV: 'true'",
   'createHash',
 ]) {
   if (!releaseSource.includes(requiredText)) {
@@ -225,6 +291,7 @@ if (!releaseSource.includes("COMMERCE_BROWSER_E2E_SERVER_MODE: 'production'")
 }
 for (const [checkName, environmentName] of [
   ['release-assets', 'isolatedEnvironment'],
+  ['next-env-isolation', 'isolatedEnvironment'],
   ['production-dependency-audit', 'isolatedEnvironment'],
   ['lint', 'isolatedEnvironment'],
   ['unit', 'isolatedEnvironment'],
@@ -308,4 +375,6 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log('[commerce-release-assets] OK workflows and production assets match package.json.');
+console.log(
+  `[commerce-release-assets] OK workflows, production assets, and ${checkedMarkdownLinks} local Markdown links match the repository.`,
+);

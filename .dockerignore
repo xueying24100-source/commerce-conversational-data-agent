@@ -8,6 +8,4 @@ tmp
 .env
 .env.*
 !.env.example
-!.env.commerce.example
 !.env.production.example
-

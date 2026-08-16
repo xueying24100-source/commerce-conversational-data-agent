@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.gif binary
+*.png binary
+
+# Large deterministic artifacts are reviewable but should not distort GitHub's
+# language statistics or be mistaken for hand-authored application code.
+/contracts/commerce-data-contract/v1/fixtures/*.json linguist-generated=true
+/contracts/commerce-data-contract/v1/sources/*.json linguist-generated=true
+/quality/commerce-agent-eval/v1/*.json linguist-generated=true
+/next-env.d.ts linguist-generated=true

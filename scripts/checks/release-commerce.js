@@ -150,6 +150,9 @@ function environmentWithout(environment, names) {
 const isolatedEnvironment = {
   ...environmentWithout(releaseEnvironment, scopedEnvironmentNames),
   COMMERCE_DISABLE_LOCAL_ENV_FILES: '1',
+  // Next's CLI has its own dotenv loader. Mark the environment as already
+  // processed so a developer's ignored .env.local cannot alter release checks.
+  __NEXT_PROCESSED_ENV: 'true',
 };
 const browserEnvironment = {
   ...isolatedEnvironment,
@@ -283,6 +286,7 @@ for (const [name, artifact] of Object.entries(evidenceReports)) {
 
 const checks = [
   ['release-assets', npm, npmArgs('run', 'check:release-assets'), isolatedEnvironment],
+  ['next-env-isolation', npm, npmArgs('run', 'check:next-env-isolation'), isolatedEnvironment],
   ['frozen-evaluation-assets', npm, npmArgs('run', 'check:commerce-eval-assets'), isolatedEnvironment],
   ['production-dependency-audit', npm, npmArgs(
     'audit',

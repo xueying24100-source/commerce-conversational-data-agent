@@ -105,7 +105,7 @@ Evidence 不是只展示 request 参数。每张证据卡包含：
 要求 Node.js 22.19.x、npm 10+、Docker 和 PostgreSQL 17。
 
 ~~~powershell
-Copy-Item .env.commerce.example .env.local
+Copy-Item .env.example .env.local
 docker compose -f compose.commerce.local.yml up -d --wait postgres
 npm install
 npm run db:migrate:commerce
@@ -154,6 +154,7 @@ npm run connector:commerce -- config/commerce-connector.shopify.example.json
 | npm audit | 0 vulnerability（npm 官方 audit API） |
 
 这些是本地 RC 证据，不等于生产 SLA，也不把下方仍为 not_run 的外部验收改写为通过。
+逐周实现与缺口见 [十周计划验收状态](docs/acceptance-status.md)。
 
 | Gate | 覆盖范围 | 不能证明什么 |
 | --- | --- | --- |
@@ -171,10 +172,11 @@ npm run connector:commerce -- config/commerce-connector.shopify.example.json
 
 - 100-case Final Controller HTTPS evaluator。
 - 120 次真实模型质量/稳定性评测。
+- 固定参考环境中的 5,000 次同步请求与 100 次复盘入队性能证据。
 - 飞书沙箱 100 个审批与故障队列。
 - 5 名非开发者、懂电商运营的三分钟可用性任务。
 
-状态与协议见 [quality/commerce-agent-eval/v1](quality/commerce-agent-eval/v1/README.md)、[飞书沙箱协议](quality/commerce-agent-feishu-sandbox/v1/README.md) 和 [可用性协议](quality/commerce-agent-usability/v1/README.md)。缺少外部证据时不会标记 passed。
+状态与协议见 [质量证据索引](quality/README.md)。缺少外部证据时不会标记 passed。
 
 ## 生产边界
 
@@ -202,6 +204,8 @@ npm run release:check:commerce      Non-external release gate
 
 ## 文档导航
 
+- [仓库结构与维护边界](docs/repository-layout.md)
+- [十周计划验收状态](docs/acceptance-status.md)
 - [系统架构](docs/architecture.md)
 - [异步执行与 Worker](docs/async-execution.md)
 - [Connector 与数据口径](docs/connectors.md)
@@ -210,5 +214,6 @@ npm run release:check:commerce      Non-external release gate
 - [运维 Runbook](docs/operations-runbook.md)
 - [发布 Runbook](docs/release-runbook.md)
 - [十周实现与验收计划](docs/data-agent-10-week-plan.md)
+- [秋招面试手册](docs/interview-guide.md)
 
 License: MIT

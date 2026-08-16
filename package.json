@@ -36,6 +36,7 @@
     "test:performance:commerce": "node scripts/evaluation/run-commerce-performance.js",
     "test:connector:olist": "vitest run scripts/connectors/olist-public-source.test.mjs scripts/connectors/commerce-fixture-source.test.mjs",
     "check:production": "node scripts/runtime/production-env.js",
+    "check:next-env-isolation": "node scripts/checks/check-next-env-isolation.js",
     "check:release-assets": "node scripts/checks/check-commerce-release-assets.js",
     "check:external-evidence:commerce": "node scripts/checks/check-commerce-external-evidence.js",
     "check:data:olist": "node scripts/checks/check-olist-demo.js",

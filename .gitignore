@@ -39,6 +39,7 @@ pnpm-debug.log*
 # OS / editor
 .DS_Store
 NUL
+.claude/
 .idea/
 .vscode/
 

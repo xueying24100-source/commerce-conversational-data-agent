@@ -1,4 +1,4 @@
-# Commerce Data Agent 秋招面试手册
+# 秋招面试手册：Commerce Data Agent
 
 本手册只描述当前代码。它刻意区分“已实现并验证”“确定性测试 Fixture”“需要外部环境、仍为 not_run”三类事实，避免把设计目标或模拟测试讲成生产成绩。
 
