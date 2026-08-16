@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "commerce-data-contract/v1",
+  "sources": [
+    {
+      "sourceId": "olist-public-orders",
+      "role": "public_base",
+      "repository": "https://github.com/olist/work-at-olist-data",
+      "revision": "d9e49802f3e92d09ee94ab9ccc5e457f207a8959",
+      "license": {
+        "id": "MIT",
+        "uri": "https://github.com/olist/work-at-olist-data/blob/d9e49802f3e92d09ee94ab9ccc5e457f207a8959/LICENSE"
+      },
+      "businessTimezone": "America/Sao_Paulo",
+      "snapshotUpdatedAt": "2018-10-17T20:30:18.000Z",
+      "upstreamManifestSha256": "sha256:fb4269549e89bdd5f7bd62568b9150b12b6f1dea0a7a96fcd879448ae9bdd418",
+      "files": [
+        {
+          "path": "datasets/olist_customers_dataset.csv",
+          "sha256": "sha256:c26c17f59f3027a6a0dbeb8f1fa373c38f3323ecc84f225a8f4820e5bb288df8"
+        },
+        {
+          "path": "datasets/olist_order_items_dataset.csv",
+          "sha256": "sha256:4f6abdbbc94036d0df4a76fa0520c072e31a40119d70f7f370fba1e2285d2bcb"
+        },
+        {
+          "path": "datasets/olist_products_dataset.csv",
+          "sha256": "sha256:3e6569628a17fbc75fd206ee357b59e20364b9afa90f5b6cd5b4d624c58aa9cc"
+        },
+        {
+          "path": "datasets/product_category_name_translation.csv",
+          "sha256": "sha256:a81f0d1f27b27e7293f761bc79e3ce8f348ee39c4b3ed3e49bde38f478586278"
+        },
+        {
+          "path": "datasets/olist_orders_dataset.csv",
+          "sha256": "sha256:8df58ef3d2d7e9944010f7beecd9b75367f5588ec6e3c91cec19ae3345ef9ecf"
+        }
+      ]
+    },
+    {
+      "sourceId": "controlled-commerce-fixture-v1",
+      "role": "second_compatible_adapter_fixture",
+      "repository": "local://contracts/commerce-data-contract/v1",
+      "revision": "1.0.0",
+      "license": {
+        "id": "CC0-1.0",
+        "uri": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      "businessTimezone": "Asia/Shanghai",
+      "snapshotUpdatedAt": "2025-06-01T00:00:00.000Z",
+      "upstreamManifestSha256": null,
+      "disclosure": "Controlled deterministic test data; it is not a real merchant or public observation."
+    }
+  ],
+  "derivedFixture": {
+    "fixtureId": "olist-same-source-derived-v1",
+    "seed": 20260816,
+    "algorithm": "commerce-fixture-generator",
+    "algorithmVersion": "1.0.0",
+    "baseWindow": {
+      "start": "2018-01-01",
+      "end": "2018-05-20"
+    },
+    "nativeFields": [
+      "metric_date",
+      "paid_orders",
+      "gmv"
+    ],
+    "derivedDemoFields": [
+      "visits",
+      "channel",
+      "region",
+      "sku",
+      "category",
+      "units"
+    ],
+    "lineage": [
+      "Verify all five upstream Olist CSV files against the pinned SHA-256 values.",
+      "Normalize paid orders and item-price GMV with the pinned Olist adapter.",
+      "Aggregate paid_orders and GMV to tenant-local day for 2018-01-01 through 2018-05-20.",
+      "Apply a seeded integer allocation to non-overlapping channel/product/category/region cells.",
+      "Derive visits from paid_orders using a seeded bounded conversion-rate schedule; preserve exact daily paid_orders and GMV totals.",
+      "Label every non-native field as a public-data-derived demonstration field in the adapter descriptor."
+    ],
+    "prohibitions": [
+      "Do not describe derived fields as observed Olist sessions or attribution.",
+      "Do not combine an unrelated visits dataset with Olist orders.",
+      "Do not display the snapshot as a live merchant."
+    ]
+  }
+}

@@ -5,6 +5,7 @@ const { Pool } = require('pg');
 
 const {
   parseCommerceRow,
+  publishCommerceCoverage,
   refreshCommerceCatalog,
   upsertCommerceRows,
 } = require('../db/commerce-ingest-core');
@@ -84,6 +85,7 @@ function buildRows(tenantId, now = new Date()) {
 
       rows.push(parseCommerceRow({
         tenant_id: tenantId,
+        source_id: 'commerce-local-seed',
         metric_date: isoDate(date),
         region: profile.region,
         channel: profile.channel,
@@ -146,6 +148,28 @@ async function main() {
   try {
     await client.query('BEGIN');
     await upsertCommerceRows(client, rows);
+    await client.query(
+      `INSERT INTO commerce_connector_checkpoints
+         (tenant_id, connector_id, connector_version, data_mode, source_fact_state,
+          checkpoint, source_sha256, updated_at)
+       VALUES ($1, 'commerce-local-seed', '1.0.0', 'snapshot', 'not_applicable',
+               'synthetic-local-seed', $2, NOW())
+       ON CONFLICT (tenant_id, connector_id) DO UPDATE SET updated_at = NOW()`,
+      [tenantId, `sha256:${'0'.repeat(64)}`],
+    );
+    await publishCommerceCoverage(
+      client,
+      tenantId,
+      'commerce-local-seed',
+      'snapshot',
+      'synthetic-local-seed',
+      {
+        kind: 'complete_snapshot',
+        coverageStart: rows[0].metric_date,
+        coverageEnd: rows[rows.length - 1].metric_date,
+        sourceUpdatedAt: rows[0].source_updated_at,
+      },
+    );
     await refreshCommerceCatalog(client, tenantId);
     await client.query('COMMIT');
   } catch (error) {

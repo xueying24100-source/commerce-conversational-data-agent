@@ -64,9 +64,22 @@ function validateProductionEnvironment(environment = process.env) {
   if (!releaseRevision(environment.COMMERCE_RELEASE_REVISION)) {
     issues.push('COMMERCE_RELEASE_REVISION must identify the immutable release artifact.');
   }
-  const control = postgresUrl(environment.COMMERCE_DATABASE_URL);
+  const runtimeRole = String(environment.COMMERCE_RUNTIME_ROLE || '').trim().toLowerCase();
+  if (!['web', 'worker'].includes(runtimeRole)) {
+    issues.push('COMMERCE_RUNTIME_ROLE must be explicitly set to web or worker.');
+  }
+  const controlEnv = runtimeRole === 'worker'
+    ? 'COMMERCE_CONTROL_WORKER_DATABASE_URL'
+    : 'COMMERCE_CONTROL_API_DATABASE_URL';
+  const expectedControlRole = runtimeRole === 'worker'
+    ? 'commerce_control_worker_user'
+    : 'commerce_control_api_user';
+  const control = postgresUrl(environment[controlEnv]);
   const analytics = postgresUrl(environment.COMMERCE_ANALYTICS_DATABASE_URL);
-  if (!control) issues.push('COMMERCE_DATABASE_URL must be an explicit non-placeholder PostgreSQL URL.');
+  if (!control) issues.push(`${controlEnv} must be an explicit non-placeholder PostgreSQL URL.`);
+  if (control && decodeURIComponent(control.username) !== expectedControlRole) {
+    issues.push(`${controlEnv} must use the ${expectedControlRole} PostgreSQL role.`);
+  }
   if (!analytics) {
     issues.push('COMMERCE_ANALYTICS_DATABASE_URL must be an explicit non-placeholder PostgreSQL URL.');
   }
@@ -90,9 +103,11 @@ function validateProductionEnvironment(environment = process.env) {
     globalConcurrency === null ? 4 : Math.min(4, globalConcurrency),
   );
   const maxInputTokens = positiveInteger(environment.COMMERCE_AGENT_MAX_INPUT_TOKENS, 80_000);
-  const maxPreparedInputTokens = positiveInteger(
+  const maxPreparedInputTokens = boundedInteger(
     environment.COMMERCE_AGENT_MAX_PREPARED_INPUT_TOKENS,
-    240_000,
+    400_000,
+    16_000,
+    400_000,
   );
   const jobLeaseMs = boundedInteger(environment.COMMERCE_JOB_LEASE_MS, 150_000, 30_000, 600_000);
   const jobPollMs = boundedInteger(environment.COMMERCE_JOB_POLL_MS, 1_000, 100, 30_000);
@@ -109,6 +124,7 @@ function validateProductionEnvironment(environment = process.env) {
     600_000,
   );
   const workerStaleMs = boundedInteger(environment.COMMERCE_WORKER_STALE_MS, 30_000, 5_000, 300_000);
+  const retentionDays = boundedInteger(environment.COMMERCE_RETENTION_DAYS, null, 7, 3_650);
   const maxQueuedJobs = boundedInteger(
     environment.COMMERCE_MAX_QUEUED_JOBS_PER_USER,
     8,
@@ -147,7 +163,7 @@ function validateProductionEnvironment(environment = process.env) {
     || maxPreparedInputTokens < maxInputTokens
   ) {
     issues.push(
-      'COMMERCE_AGENT_MAX_PREPARED_INPUT_TOKENS must be a positive integer no smaller than COMMERCE_AGENT_MAX_INPUT_TOKENS.',
+      'COMMERCE_AGENT_MAX_PREPARED_INPUT_TOKENS must be between 16000 and 400000 and no smaller than COMMERCE_AGENT_MAX_INPUT_TOKENS.',
     );
   }
   if (jobLeaseMs === null) issues.push('COMMERCE_JOB_LEASE_MS must be between 30000 and 600000.');
@@ -160,6 +176,9 @@ function validateProductionEnvironment(environment = process.env) {
   }
   if (workerStaleMs === null) {
     issues.push('COMMERCE_WORKER_STALE_MS must be between 5000 and 300000.');
+  }
+  if (retentionDays === null) {
+    issues.push('COMMERCE_RETENTION_DAYS must explicitly define the 7-3650 day audit retention policy.');
   }
   if (maxQueuedJobs === null) {
     issues.push('COMMERCE_MAX_QUEUED_JOBS_PER_USER must be between 1 and 100.');

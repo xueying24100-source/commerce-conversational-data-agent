@@ -79,6 +79,19 @@ async function refreshTenant(tenantId) {
               set_config('commerce.ingest_tenant_id', $1, true)`,
       [tenantId],
     );
+    const proof = await client.query(
+      `SELECT 1
+       FROM commerce_tenant_data_partitions
+       WHERE tenant_id = $1 AND completeness_state = 'ready'
+         AND coverage_proof_kind = 'connector_coverage_intersection'
+       LIMIT 1`,
+      [tenantId],
+    );
+    if (!proof.rows.length) {
+      throw new Error(
+        `Tenant ${tenantId} has no connector coverage proof; catalog refresh cannot infer completeness from facts.`,
+      );
+    }
     await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
     await client.query('COMMIT');
   } catch (error) {

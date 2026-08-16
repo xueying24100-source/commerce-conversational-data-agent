@@ -8,8 +8,10 @@ Type=simple
 User=commerce
 Group=commerce
 WorkingDirectory=/opt/commerce-data-agent/current
-EnvironmentFile=/etc/commerce-data-agent/commerce-agent.env
+EnvironmentFile=/etc/commerce-data-agent/commerce-common.env
+EnvironmentFile=/etc/commerce-data-agent/commerce-worker.env
 Environment=NODE_ENV=production
+Environment=COMMERCE_RUNTIME_ROLE=worker
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/env node scripts/runtime/production-env.js
 ExecStart=/usr/bin/env node scripts/runtime/commerce-worker.js

@@ -66,7 +66,8 @@ const child = spawn(process.execPath, [
   stdio: 'inherit',
   env: {
     ...process.env,
-    COMMERCE_DATABASE_URL: connectionString,
+    COMMERCE_CONTROL_API_DATABASE_URL: connectionString,
+    COMMERCE_CONTROL_WORKER_DATABASE_URL: connectionString,
     COMMERCE_ANALYTICS_DATABASE_URL: connectionString,
     COMMERCE_LIVE_E2E_MODEL: model,
     COMMERCE_LLM_AGENT_ENABLED: '1',

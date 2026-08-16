@@ -4,7 +4,14 @@
     {
       "id": "commerce-web",
       "owner": "commerce-product",
-      "paths": ["src/app/**", "src/contexts/**", "src/styles/**", "src/proxy.ts"],
+      "paths": [
+        "src/app/**",
+        "src/components/**",
+        "src/contexts/**",
+        "src/lib/utils/**",
+        "src/styles/**",
+        "src/proxy.ts"
+      ],
       "dependsOn": ["commerce-agent"]
     },
     {

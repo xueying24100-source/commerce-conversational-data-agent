@@ -10,6 +10,11 @@ Web、Worker 和 Connector 输出 JSON 日志。Worker 事件包含 `jobId`、`r
 
 `GET /api/metrics` 使用 `Authorization: Bearer $COMMERCE_METRICS_TOKEN`。未授权请求返回 404，避免对公网暴露指标端点。全局 control-plane 指标包括：
 
+Web API role 不能进入 Worker-only 的 `commerce.control_system` RLS 分支。全局指标通过只返回
+固定聚合字段的 `commerce_collect_control_metrics(integer)` SECURITY DEFINER 函数生成；函数
+执行权仅授予 control API/Worker role，PUBLIC、maintenance 和 backup 显式撤销。这样 Prometheus
+可观察全局队列，而 `/api/metrics` 不会成为跨租户明细查询通道。
+
 - `commerce_agent_jobs{status=...}`
 - `commerce_agent_runs{status=...}`
 - `commerce_agent_run_duration_seconds_sum/count`
@@ -18,6 +23,12 @@ Web、Worker 和 Connector 输出 JSON 日志。Worker 事件包含 `jobId`、`r
 - `commerce_agent_workers`
 - `commerce_agent_queue_depth`
 - `commerce_agent_queue_oldest_seconds`
+- `commerce_agent_success_ratio`
+- `commerce_agent_tool_calls{operation=...}`
+- `commerce_agent_model_budget_usd{kind=reserved|spent|limit}`
+- `commerce_feishu_notifications{status=...}`
+- `commerce_action_review_backlog{status=...}`
+- `commerce_weekly_diagnosis_runs{status=...}`
 
 需要 Connector 指标时，每个 scrape target 必须额外发送 `x-commerce-metrics-tenant-id: <tenant_id>`。路由会校验 tenant ID，并在 analytics 连接中设置该 tenant 的 RLS context；不使用 `BYPASSRLS`，也不支持一次跨租户抓取。该 target 额外输出：
 
@@ -39,4 +50,4 @@ Web、Worker 和 Connector 输出 JSON 日志。Worker 事件包含 `jobId`、`r
 
 建议告警：Worker 数量为 0、oldest queue age 持续上升、failed Job/Run 增长、readiness 失败、增量数据水位过期、Connector run failed 或 stale。
 
-可直接加载的 Prometheus rules 位于 `deploy/observability/prometheus/commerce-alerts.yml`，覆盖 Worker 消失、队列阻塞、队列积压、dead-letter Job、Connector 最近一次失败、增量 Connector 超过 26 小时未成功，以及拒收行比例超过 1%。readiness 与租户数据水位仍应由平台 blackbox probe 按 tenant 检查。
+可直接加载的 Prometheus rules 位于 `deploy/observability/prometheus/commerce-alerts.yml`，覆盖 Worker 消失、队列阻塞、队列积压、dead-letter Job、Agent 成功率、每日模型预算、Feishu `delivery_unknown`、复盘积压、周诊断失败、Connector 最近一次失败、增量 Connector 超过 26 小时未成功，以及拒收行比例超过 1%。readiness 与租户数据水位仍应由平台 blackbox probe 按 tenant 检查。

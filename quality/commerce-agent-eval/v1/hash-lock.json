@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "hashAlgorithm": "SHA-256",
+  "hashScope": "canonical_json_sorted_object_keys_preserving_array_order",
+  "frozenAt": "2026-08-16T00:00:00.000Z",
+  "artifacts": [
+    {
+      "path": "contracts/commerce-data-contract/v1/contract.json",
+      "sha256": "sha256:ea9ee8609d54072633c636e72004620d8065970e29a04a7fed83afb3226f67db"
+    },
+    {
+      "path": "contracts/commerce-data-contract/v1/fixture-manifest.json",
+      "sha256": "sha256:8948118bb104564ef3a285e5cec674a70d688f464236ba8dc048cd41ec254b25"
+    },
+    {
+      "path": "contracts/commerce-data-contract/v1/fixtures/controlled-compatible-v1.json",
+      "sha256": "sha256:8ef7b555a56432d08f7640354d794eb474e819347a535ff957e6eff2178417d3"
+    },
+    {
+      "path": "contracts/commerce-data-contract/v1/fixtures/olist-same-source-derived-v1.json",
+      "sha256": "sha256:448546cc941c7fea7c802c61dfa088e1958c3b5f95bfd95f00989dd75a4c5df7"
+    },
+    {
+      "path": "contracts/commerce-data-contract/v1/source-manifest.json",
+      "sha256": "sha256:27d44dbfbb8cdf89be21aaa4552f67f6cba7ad18c5597935944d5456f2850f89"
+    },
+    {
+      "path": "contracts/commerce-data-contract/v1/sources/olist-base-daily-totals-v1.json",
+      "sha256": "sha256:1c617100b83a28da6f576002c3347ddce1d431d97406d652bd0111d478729262"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/dev-manifest.json",
+      "sha256": "sha256:00920eed9918f6c7c3d09dd50e9533923116bef85f66cb914e52e8448361e737"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/dev-oracle.json",
+      "sha256": "sha256:5037a81b003f086d20a9dbf509cba3a5c6469882734de898e6eb45e1d9b9eb15"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/execution-status.json",
+      "sha256": "sha256:493cf35d9ec77436eb4c7451329076c1feaf26455a95f3c991fc24b7a3edc876"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/final-manifest.json",
+      "sha256": "sha256:a0951a51f057a78de5467651a297f74d2f535612eaac03fbac13fcedcb5729ef"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/final-oracle.json",
+      "sha256": "sha256:fa8b404480b334eefe3c2cd5aa473b893f0394ce38bbb437aa7768dae770d65d"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/fixed-policy-dev-report.json",
+      "sha256": "sha256:d4a9d14bd6381881e2c2e07034f4da08a0dc9f2434a1e40d5f5c5df7eb91943b"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/fixed-policy-dev-results.json",
+      "sha256": "sha256:132fa14f1f1fa8619e72ab1dd017bcba92b215dc4ab529b9f7e8deb84689c396"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/fixed-policy-final-report.json",
+      "sha256": "sha256:c36f22a53849acfa8727dc84fde3013f8d7a4ab3511b45ac9673150976dd9e10"
+    },
+    {
+      "path": "quality/commerce-agent-eval/v1/fixed-policy-final-results.json",
+      "sha256": "sha256:d915d5aca1f58066a5292945b54392783cb5d80a6c70bdd452cb1deddf427474"
+    }
+  ]
+}

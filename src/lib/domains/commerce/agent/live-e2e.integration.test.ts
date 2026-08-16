@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NextRequest } from 'next/server';
@@ -23,6 +24,11 @@ import type {
 } from './database';
 import type { CommerceIdentity } from './types';
 import type { CommerceAgentJob, CommerceAgentRunResponse } from './types';
+
+const require = createRequire(import.meta.url);
+const {
+  publishCommerceCoverage,
+} = require('../../../../../scripts/db/commerce-ingest-core.js');
 
 const connectionString = process.env.COMMERCE_LIVE_E2E_DATABASE_URL;
 if (!connectionString) {
@@ -138,6 +144,25 @@ async function withTenant<T>(work: (client: CommerceSqlClient) => Promise<T>): P
   });
 }
 
+async function publishFixtureCoverage(client: CommerceSqlClient): Promise<void> {
+  const connectorId = 'live-e2e-fixture';
+  const runId = `fixture_coverage_${suffix}`;
+  await client.query(
+    `INSERT INTO commerce_connector_checkpoints
+       (tenant_id, connector_id, connector_version, data_mode, source_fact_state,
+        checkpoint, updated_at)
+     VALUES ($1, $2, '1.0.0', 'snapshot', 'not_applicable', $3, NOW())`,
+    [tenantId, connectorId, runId],
+  );
+  await publishCommerceCoverage(client, tenantId, connectorId, 'snapshot', runId, {
+    kind: 'complete_snapshot',
+    coverageStart: '2026-07-01',
+    coverageEnd: '2026-07-07',
+    sourceUpdatedAt: '2026-07-07T23:59:59.000Z',
+  });
+  await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+}
+
 beforeAll(async () => {
   process.env.COMMERCE_DEV_AUTH_BYPASS = '1';
   process.env.COMMERCE_DEV_TENANT_ID = identity.tenantId;
@@ -150,24 +175,24 @@ beforeAll(async () => {
     for (let day = 1; day <= 7; day += 1) {
       await client.query(
         `INSERT INTO commerce_daily_metrics
-           (tenant_id, metric_date, region, channel, sku, category, visits, paid_orders,
+           (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
             units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
             stockout_hours, ending_inventory, source_updated_at)
-         VALUES ($1, $2::date, 'East', 'Search', 'SKU-LIVE', 'Apparel',
+         VALUES ($1, 'live-e2e-fixture', $2::date, 'East', 'Search', 'SKU-LIVE', 'Apparel',
                  100, 10, 10, 100, 0, 0, 40, 10, 2, 0, 50, NOW())`,
         [tenantId, `2026-07-${String(day).padStart(2, '0')}`],
       );
       await client.query(
         `INSERT INTO commerce_daily_metrics
-           (tenant_id, metric_date, region, channel, sku, category, visits, paid_orders,
+           (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
             units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
             stockout_hours, ending_inventory, source_updated_at)
-         VALUES ($1, $2::date, 'West', 'Affiliate', 'SKU-RISK', 'Electronics',
+         VALUES ($1, 'live-e2e-fixture', $2::date, 'West', 'Affiliate', 'SKU-RISK', 'Electronics',
                  50, 5, 5, 50, 1, 5, 25, 5, 1, 4, 2, NOW())`,
         [tenantId, `2026-07-${String(day).padStart(2, '0')}`],
       );
     }
-    await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+    await publishFixtureCoverage(client);
   });
 });
 
@@ -183,6 +208,9 @@ afterAll(async () => {
   );
   await withTenant(async (client) => {
     await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+    await client.query('DELETE FROM commerce_tenant_data_partitions WHERE tenant_id = $1', [tenantId]);
+    await client.query('DELETE FROM commerce_connector_date_coverage WHERE tenant_id = $1', [tenantId]);
+    await client.query('DELETE FROM commerce_connector_checkpoints WHERE tenant_id = $1', [tenantId]);
     await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
     await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
   });

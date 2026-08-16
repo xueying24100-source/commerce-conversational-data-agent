@@ -3,9 +3,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+const { createHash, randomUUID } = require('node:crypto');
 const { Pool } = require('pg');
 
 const {
+  claimCommerceDirectWriterOwnership,
   parseCommerceRow,
   refreshCommerceCatalog,
   upsertCommerceRows,
@@ -13,6 +15,7 @@ const {
 const { loadLocalEnv } = require('./load-local-env');
 
 const root = path.join(__dirname, '..', '..');
+const DIRECT_IMPORT_CONNECTOR_ID = 'commerce-jsonl-import';
 loadLocalEnv(root);
 
 const sourceArgument = process.argv[2];
@@ -26,6 +29,7 @@ if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
   console.error(`JSONL input file was not found: ${sourcePath}`);
   process.exit(1);
 }
+const sourceSha256 = `sha256:${createHash('sha256').update(fs.readFileSync(sourcePath)).digest('hex')}`;
 
 const production = process.env.NODE_ENV === 'production';
 const connectionString = process.env.COMMERCE_ANALYTICS_INGEST_DATABASE_URL
@@ -76,6 +80,8 @@ async function main() {
   let buffered = 0;
   const rowsByTenant = new Map();
   const importedTenants = new Set();
+  const importedRowsByTenant = new Map();
+  const claimedTenantModes = new Map();
   try {
     await client.query('BEGIN');
     const lines = readline.createInterface({
@@ -94,11 +100,32 @@ async function main() {
       } catch {
         throw new Error(`Line ${lineNumber}: invalid JSON.`);
       }
-      const row = parseCommerceRow(value, lineNumber);
+      const row = parseCommerceRow(value, lineNumber, undefined, DIRECT_IMPORT_CONNECTOR_ID);
+      const claimedMode = claimedTenantModes.get(row.tenant_id);
+      if (claimedMode && claimedMode !== row.data_mode) {
+        throw new Error(
+          `Tenant ${row.tenant_id} mixes ${claimedMode} and ${row.data_mode} data modes in one import.`,
+        );
+      }
+      if (!claimedMode) {
+        await claimCommerceDirectWriterOwnership(
+          client,
+          row.tenant_id,
+          DIRECT_IMPORT_CONNECTOR_ID,
+          row.data_mode,
+          '1.0.0',
+          sourceSha256,
+        );
+        claimedTenantModes.set(row.tenant_id, row.data_mode);
+      }
       const tenantRows = rowsByTenant.get(row.tenant_id) || [];
       tenantRows.push(row);
       rowsByTenant.set(row.tenant_id, tenantRows);
       importedTenants.add(row.tenant_id);
+      importedRowsByTenant.set(
+        row.tenant_id,
+        (importedRowsByTenant.get(row.tenant_id) || 0) + 1,
+      );
       imported += 1;
       buffered += 1;
       if (buffered >= 250) {
@@ -107,9 +134,24 @@ async function main() {
       }
     }
     await flush(client, rowsByTenant);
-    for (const tenantId of importedTenants) await refreshCommerceCatalog(client, tenantId);
+    for (const tenantId of importedTenants) {
+      await refreshCommerceCatalog(client, tenantId);
+      const tenantRows = importedRowsByTenant.get(tenantId) || 0;
+      await client.query(
+        `INSERT INTO commerce_connector_runs
+           (id, tenant_id, connector_id, connector_version, transport, status,
+            checkpoint_after, source_sha256, source_rows, imported_rows, completed_at)
+         VALUES ($1, $2, $3, '1.0.0', 'file', 'completed', 'direct-writer', $4, $5, $5, NOW())`,
+        [`connector_run_${randomUUID()}`, tenantId, DIRECT_IMPORT_CONNECTOR_ID, sourceSha256, tenantRows],
+      );
+    }
     await client.query('COMMIT');
-    console.log(JSON.stringify({ sourcePath, importedRows: imported, tenants: importedTenants.size }));
+    console.log(JSON.stringify({
+      sourcePath,
+      sourceSha256,
+      importedRows: imported,
+      tenants: importedTenants.size,
+    }));
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;

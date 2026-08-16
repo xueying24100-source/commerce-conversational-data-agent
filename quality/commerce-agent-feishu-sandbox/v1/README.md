@@ -1,0 +1,15 @@
+# Feishu sandbox release protocol v1
+
+Status: `not_run`. This protocol is not evidence of delivery until a revision-bound report and provider message IDs are attached.
+
+Prerequisites: a dedicated Feishu sandbox tenant, self-built app, encrypted App ID/Secret, bot-send and member-identity scopes, API/domain allowlist, tenant-member to `open_id` mapping, authorized operator allowlist, authenticated application backlink, and `COMMERCE_FEISHU_NOTIFICATIONS_ENABLED=1`. If any prerequisite is missing, keep the flag off.
+
+The normal cohort contains 100 independently approved action versions. Record for every approval: tenant, action/version, logical Outbox ID, stable request UUID, recipient member ID, approval time, delivery time, final Outbox state, and actual Feishu message ID. Acceptance requires at least 99 delivered and p95 confirmation-to-delivery no more than 60 seconds. Report both unique logical commands and unique provider message IDs; do not infer physical exactly-once from the Outbox key.
+
+Run a separate fault cohort for 202, 429, 500, pre-send timeout, post-send transport exception, and Worker crash. Assert the Oracle state transition for each case. A post-send exception without provider reconciliation must become `delivery_unknown` and must not blind-retry. Approval replay is tested by submitting one approval 10 times and requiring one approval event, one logical command, one request UUID, and at most one same-version provider message.
+
+Negative cases must produce zero external messages: proposed/unapproved, ignored, snoozed, unauthorized operator, forged member ID, removed member, cross-tenant member, global kill switch, and filtered sensitive payload. A reissued action is allowed only as version + 1 after explicit approval and must link to the prior `delivery_unknown` command.
+
+The final JSON report must contain `schemaVersion`, `service`, immutable `revision`, `status`, sandbox tenant identifier, app-scope fingerprint, cohort sizes, delivery numerator/denominator, p50/p95 latency, logical-command count, distinct provider-message count, duplicate same-version message count, negative-case results, fault-case transitions, and redacted failure records. Secrets, raw PII, connection strings, anonymous report tokens, and message bodies are forbidden in the artifact.
+
+The machine gate consumes the following canonical field names: `sandbox.tenantFingerprint`, `sandbox.appScopeFingerprint`, `normalCohort.{approvals,delivered,p50Ms,p95Ms,logicalCommandCount,distinctRequestUuidCount,duplicateSameVersionMessages,providerMessageIdDigests}`, `approvalReplay.{submissions,approvalEvents,logicalCommands,requestUuids,sameVersionProviderMessages,passed}`, and arrays `negativeCases` / `faultCases`. Provider IDs are represented only as distinct `sha256:<64 hex>` digests. Every fault entry records `blindRetries`; `post_send_transport_exception.actualState` must equal `delivery_unknown`. The required case identifiers are enforced in `scripts/checks/check-commerce-external-evidence.js`.

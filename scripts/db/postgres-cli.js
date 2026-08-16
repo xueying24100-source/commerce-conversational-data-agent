@@ -1,4 +1,5 @@
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 function postgresCliConnection(value, label) {
   if (!value) throw new Error(`${label} is required.`);
@@ -52,14 +53,20 @@ function runPostgresCli(binary, args, connection, sslEnvironment) {
 }
 
 function assertRestoreDrillTarget(connection, label) {
-  if (!/(?:restore|drill|scratch|test)/iu.test(connection.database)) {
-    throw new Error(`${label} database name must contain restore, drill, scratch or test.`);
+  if (!/(?:^|[_-])(?:restore|drill|scratch|test)(?:[_-]|$)/iu.test(connection.database)) {
+    throw new Error(`${label} database name must contain a delimited restore, drill, scratch or test marker.`);
   }
+}
+
+function postgresDatabaseFingerprint(connection) {
+  const identity = `${connection.host.toLowerCase()}:${connection.port}/${connection.database.toLowerCase()}`;
+  return `sha256:${createHash('sha256').update(identity).digest('hex')}`;
 }
 
 module.exports = {
   assertRestoreDrillTarget,
   postgresCliConnection,
+  postgresDatabaseFingerprint,
   postgresCliSslEnvironment,
   runPostgresCli,
 };

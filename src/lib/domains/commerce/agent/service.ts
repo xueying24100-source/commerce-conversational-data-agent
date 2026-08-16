@@ -14,6 +14,7 @@ import {
 import {
   getCommerceAnalyticsDatabase,
   getCommerceControlDatabase,
+  withCommerceControlIdentity,
 } from './database';
 import {
   createCommerceModelRuntime,
@@ -135,16 +136,21 @@ export class CommerceAgentService {
   constructor(private readonly dependencies: CommerceAgentServiceDependencies) {}
 
   listConversations(identity: CommerceIdentity): Promise<CommerceConversationSummary[]> {
-    return this.dependencies.store.listConversations(identity);
+    return withCommerceControlIdentity(
+      identity,
+      () => this.dependencies.store.listConversations(identity),
+    );
   }
 
   async getConversation(
     identity: CommerceIdentity,
     conversationId: string,
   ): Promise<CommerceConversation> {
-    const conversation = await this.dependencies.store.getConversation(identity, conversationId);
-    if (!conversation) throw new CommerceConversationNotFoundError();
-    return conversation;
+    return withCommerceControlIdentity(identity, async () => {
+      const conversation = await this.dependencies.store.getConversation(identity, conversationId);
+      if (!conversation) throw new CommerceConversationNotFoundError();
+      return conversation;
+    });
   }
 
   async createConversationAndRun(input: {
@@ -155,6 +161,7 @@ export class CommerceAgentService {
     retryFailed?: boolean;
     signal?: AbortSignal;
   }): Promise<CommerceAgentRunResponse> {
+    return withCommerceControlIdentity(input.identity, async () => {
     const config = getCommerceAgentRuntimeConfig();
     const modelSelection = resolveCommerceModelSelection(input.model);
     const runId = `commerce-agent-${randomUUID()}`;
@@ -185,6 +192,7 @@ export class CommerceAgentService {
           conversationId: retried.conversationId,
           message: input.message,
           runId: retried.runId,
+          generation: retried.generation,
           signal: input.signal,
         });
       }
@@ -221,7 +229,9 @@ export class CommerceAgentService {
       conversationId: began.conversation.id,
       message: input.message,
       runId,
+      generation: began.generation,
       signal: input.signal,
+    });
     });
   }
 
@@ -233,6 +243,7 @@ export class CommerceAgentService {
     retryFailed?: boolean;
     signal?: AbortSignal;
   }): Promise<CommerceAgentRunResponse> {
+    return withCommerceControlIdentity(input.identity, async () => {
     const config = getCommerceAgentRuntimeConfig();
     const conversation = await this.dependencies.store.getConversation(
       input.identity,
@@ -272,6 +283,7 @@ export class CommerceAgentService {
           conversationId: conversation.id,
           message: input.message,
           runId: retried.runId,
+          generation: retried.generation,
           signal: input.signal,
         });
       }
@@ -309,7 +321,9 @@ export class CommerceAgentService {
       conversationId: conversation.id,
       message: input.message,
       runId,
+      generation: began.generation,
       signal: input.signal,
+    });
     });
   }
 
@@ -318,6 +332,7 @@ export class CommerceAgentService {
     conversationId: string;
     message: string;
     runId: string;
+    generation: number;
     signal?: AbortSignal;
   }): Promise<CommerceAgentRunResponse> {
     const config = getCommerceAgentRuntimeConfig();
@@ -328,6 +343,7 @@ export class CommerceAgentService {
       renew: () => this.dependencies.store.renewRunLease({
         identity: input.identity,
         runId: input.runId,
+        generation: input.generation,
         leaseMs,
       }),
     });
@@ -359,6 +375,7 @@ export class CommerceAgentService {
             identity: input.identity,
             conversationId: conversation.id,
             runId: input.runId,
+            generation: input.generation,
             trace,
           }),
         });
@@ -372,6 +389,7 @@ export class CommerceAgentService {
         identity: input.identity,
         conversationId: conversation.id,
         runId: input.runId,
+        generation: input.generation,
         assistantMessageId,
         answer: result.answer,
         usage: result.usage,
@@ -402,6 +420,7 @@ export class CommerceAgentService {
       await this.dependencies.store.failTurn({
         identity: input.identity,
         runId: input.runId,
+        generation: input.generation,
         code: error instanceof Error && 'code' in error ? String(error.code) : 'COMMERCE_AGENT_FAILED',
         message: error instanceof Error ? error.message : 'Unknown Commerce Agent failure.',
         usage: runError?.usage ?? executionState.result?.usage,

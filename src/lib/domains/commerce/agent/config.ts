@@ -7,6 +7,15 @@ function positiveInteger(name: string, fallback: number, min: number, max: numbe
     : fallback;
 }
 
+function positiveDecimal(name: string, min: number, max: number): number | null {
+  const raw = process.env[name]?.trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max
+    ? parsed
+    : null;
+}
+
 function flag(name: string, fallback: boolean): boolean {
   const value = process.env[name]?.trim().toLowerCase();
   if (!value) return fallback;
@@ -84,6 +93,7 @@ function isReleaseRevision(value: string | undefined): boolean {
 export interface CommerceAgentRuntimeConfig {
   publicOrigin: string | null;
   databaseUrl: string | null;
+  controlRuntimeRole: 'web' | 'worker';
   analyticsDatabaseUrl: string | null;
   trustedProxySecret: string | null;
   developmentAuthBypass: boolean;
@@ -112,15 +122,96 @@ export interface CommerceAgentRuntimeConfig {
   jobRetryBaseMs: number;
   jobRetryMaxMs: number;
   maxQueuedJobsPerUser: number;
+  accountHourlyDiagnosisLimit: number;
+  ipHourlyDiagnosisLimit: number;
   jobMaxAttempts: number;
   workerStaleMs: number;
   metricsToken: string | null;
+  diagnosticPolicyEnabled: boolean;
+  anomalyDetectionEnabled: boolean;
+  weeklyDiagnosisEnabled: boolean;
+  notificationsEnabled: boolean;
+  automaticReviewEnabled: boolean;
+  globalKillSwitch: boolean;
+  feishuAppId: string | null;
+  feishuAppSecret: string | null;
+  feishuBaseUrl: string;
+  dailyModelBudgetUsd: number | null;
+  modelInputUsdPerMillionTokens: number | null;
+  modelOutputUsdPerMillionTokens: number | null;
+}
+
+export interface CommerceModelBudgetPolicy {
+  dailyLimitUsd: number;
+  reservationUsd: number;
+  inputUsdPerMillionTokens: number;
+  outputUsdPerMillionTokens: number;
+}
+
+export class CommerceModelBudgetConfigurationError extends Error {
+  readonly code = 'COMMERCE_MODEL_BUDGET_NOT_CONFIGURED';
+  readonly status = 503;
+
+  constructor(message = '模型日预算已启用，但缺少有效的输入或输出 token 单价。') {
+    super(message);
+    this.name = 'CommerceModelBudgetConfigurationError';
+  }
+}
+
+function roundUsdUp(value: number): number {
+  return Math.ceil(value * 100_000_000) / 100_000_000;
+}
+
+export function commerceModelBudgetPolicy(
+  config: CommerceAgentRuntimeConfig = getCommerceAgentRuntimeConfig(),
+): CommerceModelBudgetPolicy | null {
+  if (config.dailyModelBudgetUsd === null) {
+    if (process.env.DAILY_MODEL_BUDGET_USD?.trim()) {
+      throw new CommerceModelBudgetConfigurationError(
+        'DAILY_MODEL_BUDGET_USD 必须是大于 0 的有限数值。',
+      );
+    }
+    return null;
+  }
+  if (
+    config.modelInputUsdPerMillionTokens === null
+    || config.modelOutputUsdPerMillionTokens === null
+  ) {
+    throw new CommerceModelBudgetConfigurationError();
+  }
+  // The configured prices are deployment-wide conservative ceilings across all
+  // enabled model profiles. Reserve the hard run envelope before enqueue. This is based on
+  // prepared input rather than the softer provider-reported input budget, so a
+  // response that crosses the latter cannot make the daily ledger overspend.
+  const reservationUsd = roundUsdUp(
+    (
+      config.maxPreparedInputTokens * config.modelInputUsdPerMillionTokens
+      + config.maxOutputTokens * config.modelOutputUsdPerMillionTokens
+    ) / 1_000_000,
+  );
+  if (!(reservationUsd > 0)) {
+    throw new CommerceModelBudgetConfigurationError(
+      '模型日预算已启用，但计算出的单 Run 预算预留金额无效。',
+    );
+  }
+  return {
+    dailyLimitUsd: config.dailyModelBudgetUsd,
+    reservationUsd,
+    inputUsdPerMillionTokens: config.modelInputUsdPerMillionTokens,
+    outputUsdPerMillionTokens: config.modelOutputUsdPerMillionTokens,
+  };
 }
 
 export function getCommerceAgentRuntimeConfig(): CommerceAgentRuntimeConfig {
-  const databaseUrl = process.env.COMMERCE_DATABASE_URL?.trim()
-    || (process.env.NODE_ENV === 'production' ? null : process.env.DATABASE_URL?.trim())
+  const requestedRuntimeRole = process.env.COMMERCE_RUNTIME_ROLE?.trim().toLowerCase();
+  const controlRuntimeRole = requestedRuntimeRole === 'worker' ? 'worker' : 'web';
+  const legacyDatabaseUrl = process.env.COMMERCE_DATABASE_URL?.trim()
+    || process.env.DATABASE_URL?.trim()
     || null;
+  const databaseUrl = (controlRuntimeRole === 'worker'
+    ? process.env.COMMERCE_CONTROL_WORKER_DATABASE_URL?.trim()
+    : process.env.COMMERCE_CONTROL_API_DATABASE_URL?.trim())
+    || (process.env.NODE_ENV === 'production' ? null : legacyDatabaseUrl);
   const analyticsDatabaseUrl = process.env.COMMERCE_ANALYTICS_DATABASE_URL?.trim()
     || (process.env.NODE_ENV === 'production' ? null : databaseUrl);
   const pgPoolMax = positiveInteger('COMMERCE_PG_POOL_MAX', 10, 3, 50);
@@ -133,9 +224,10 @@ export function getCommerceAgentRuntimeConfig(): CommerceAgentRuntimeConfig {
   return {
     publicOrigin: process.env.COMMERCE_PUBLIC_ORIGIN?.trim()?.replace(/\/$/u, '') || null,
     databaseUrl,
+    controlRuntimeRole,
     analyticsDatabaseUrl,
     trustedProxySecret: process.env.COMMERCE_TRUSTED_PROXY_SECRET?.trim() || null,
-    developmentAuthBypass: flag('COMMERCE_DEV_AUTH_BYPASS', process.env.NODE_ENV !== 'production'),
+    developmentAuthBypass: flag('COMMERCE_DEV_AUTH_BYPASS', false),
     developmentTenantId: process.env.COMMERCE_DEV_TENANT_ID?.trim() || 'tenant_local',
     developmentUserId: process.env.COMMERCE_DEV_USER_ID?.trim() || 'user_local',
     maxTurns: positiveInteger('COMMERCE_AGENT_MAX_TURNS', 8, 2, 16),
@@ -144,7 +236,7 @@ export function getCommerceAgentRuntimeConfig(): CommerceAgentRuntimeConfig {
     maxInputTokens: positiveInteger('COMMERCE_AGENT_MAX_INPUT_TOKENS', 80_000, 8_000, 200_000),
     maxPreparedInputTokens: positiveInteger(
       'COMMERCE_AGENT_MAX_PREPARED_INPUT_TOKENS',
-      240_000,
+      400_000,
       16_000,
       400_000,
     ),
@@ -175,10 +267,37 @@ export function getCommerceAgentRuntimeConfig(): CommerceAgentRuntimeConfig {
     jobPollMs: positiveInteger('COMMERCE_JOB_POLL_MS', 1_000, 100, 30_000),
     jobRetryBaseMs: positiveInteger('COMMERCE_JOB_RETRY_BASE_MS', 2_000, 100, 60_000),
     jobRetryMaxMs: positiveInteger('COMMERCE_JOB_RETRY_MAX_MS', 60_000, 1_000, 600_000),
-    maxQueuedJobsPerUser: positiveInteger('COMMERCE_MAX_QUEUED_JOBS_PER_USER', 8, 1, 100),
+    maxQueuedJobsPerUser: positiveInteger('COMMERCE_MAX_QUEUED_JOBS_PER_USER', 2, 1, 100),
+    accountHourlyDiagnosisLimit: positiveInteger('COMMERCE_ACCOUNT_HOURLY_DIAGNOSIS_LIMIT', 5, 1, 1_000),
+    ipHourlyDiagnosisLimit: positiveInteger('COMMERCE_IP_HOURLY_DIAGNOSIS_LIMIT', 20, 1, 10_000),
     jobMaxAttempts: positiveInteger('COMMERCE_JOB_MAX_ATTEMPTS', 3, 1, 10),
     workerStaleMs: positiveInteger('COMMERCE_WORKER_STALE_MS', 30_000, 5_000, 300_000),
     metricsToken: process.env.COMMERCE_METRICS_TOKEN?.trim() || null,
+    diagnosticPolicyEnabled: flag('COMMERCE_DIAGNOSTIC_POLICY_ENABLED', true),
+    anomalyDetectionEnabled: flag('COMMERCE_ANOMALY_DETECTION_ENABLED', true),
+    weeklyDiagnosisEnabled: flag('COMMERCE_WEEKLY_DIAGNOSIS_ENABLED', false),
+    notificationsEnabled: flag('COMMERCE_FEISHU_NOTIFICATIONS_ENABLED', false),
+    automaticReviewEnabled: flag('COMMERCE_AUTOMATIC_REVIEW_ENABLED', false),
+    globalKillSwitch: flag('COMMERCE_GLOBAL_KILL_SWITCH', false),
+    feishuAppId: process.env.COMMERCE_FEISHU_APP_ID?.trim() || null,
+    feishuAppSecret: process.env.COMMERCE_FEISHU_APP_SECRET?.trim() || null,
+    feishuBaseUrl: process.env.COMMERCE_FEISHU_BASE_URL?.trim().replace(/\/$/u, '')
+      || 'https://open.feishu.cn',
+    dailyModelBudgetUsd: positiveDecimal(
+      'DAILY_MODEL_BUDGET_USD',
+      0.00000001,
+      9_999_999_999.99999999,
+    ),
+    modelInputUsdPerMillionTokens: positiveDecimal(
+      'COMMERCE_MODEL_INPUT_USD_PER_MILLION_TOKENS',
+      0.000001,
+      1_000_000,
+    ),
+    modelOutputUsdPerMillionTokens: positiveDecimal(
+      'COMMERCE_MODEL_OUTPUT_USD_PER_MILLION_TOKENS',
+      0.000001,
+      1_000_000,
+    ),
   };
 }
 
@@ -216,11 +335,44 @@ export function commerceConfigurationStatus() {
   if (config.jobRetryMaxMs < config.jobRetryBaseMs) {
     issues.push('COMMERCE_JOB_RETRY_MAX_MS 不能小于 COMMERCE_JOB_RETRY_BASE_MS。');
   }
-  if (!config.databaseUrl) issues.push('缺少 COMMERCE_DATABASE_URL。');
+  if (!config.databaseUrl) {
+    issues.push(config.controlRuntimeRole === 'worker'
+      ? '缺少 COMMERCE_CONTROL_WORKER_DATABASE_URL。'
+      : '缺少 COMMERCE_CONTROL_API_DATABASE_URL。');
+  }
   if (!config.analyticsDatabaseUrl) issues.push('缺少 COMMERCE_ANALYTICS_DATABASE_URL。');
   if (!modelConfigured) issues.push('缺少 MODELPORT_API_KEY 或 DEEPSEEK_API_KEY。');
   if (!agentEnabled) issues.push('COMMERCE_LLM_AGENT_ENABLED 已关闭。');
+  if (config.weeklyDiagnosisEnabled && !config.diagnosticPolicyEnabled) {
+    issues.push('开启周诊断调度必须同时开启 COMMERCE_DIAGNOSTIC_POLICY_ENABLED。');
+  }
+  if (config.weeklyDiagnosisEnabled && !config.anomalyDetectionEnabled) {
+    issues.push('开启周诊断调度必须同时开启 COMMERCE_ANOMALY_DETECTION_ENABLED。');
+  }
+  if (config.notificationsEnabled) {
+    if (!isConfiguredCommerceCredential(config.feishuAppId)) {
+      issues.push('开启飞书通知需要 COMMERCE_FEISHU_APP_ID。');
+    }
+    if (!isConfiguredCommerceCredential(config.feishuAppSecret)) {
+      issues.push('开启飞书通知需要 COMMERCE_FEISHU_APP_SECRET。');
+    }
+    if (!(process.env.COMMERCE_FEISHU_OPERATOR_ALLOWLIST?.trim())) {
+      issues.push('开启飞书通知需要 COMMERCE_FEISHU_OPERATOR_ALLOWLIST。');
+    }
+  }
+  try {
+    commerceModelBudgetPolicy(config);
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : '模型预算定价配置无效。');
+  }
   if (process.env.NODE_ENV === 'production') {
+    const declaredRuntimeRole = process.env.COMMERCE_RUNTIME_ROLE?.trim().toLowerCase();
+    if (declaredRuntimeRole !== 'web' && declaredRuntimeRole !== 'worker') {
+      issues.push('生产环境必须将 COMMERCE_RUNTIME_ROLE 显式设为 web 或 worker。');
+    }
+    if (config.dailyModelBudgetUsd === null) {
+      issues.push('生产环境必须设置正数 DAILY_MODEL_BUDGET_USD。');
+    }
     if (!isReleaseRevision(process.env.COMMERCE_RELEASE_REVISION)) {
       issues.push('生产环境需要不可变的 COMMERCE_RELEASE_REVISION。');
     }
@@ -239,7 +391,13 @@ export function commerceConfigurationStatus() {
     const controlUser = postgresUsername(config.databaseUrl);
     const analyticsUser = postgresUsername(config.analyticsDatabaseUrl);
     if (config.databaseUrl && !controlUser) {
-      issues.push('COMMERCE_DATABASE_URL 必须是有效 PostgreSQL URL。');
+      issues.push('Control runtime database URL 必须是有效 PostgreSQL URL。');
+    }
+    const expectedControlUser = config.controlRuntimeRole === 'worker'
+      ? 'commerce_control_worker_user'
+      : 'commerce_control_api_user';
+    if (controlUser && controlUser !== expectedControlUser) {
+      issues.push(`Control runtime database URL 必须使用 ${expectedControlUser}。`);
     }
     if (config.analyticsDatabaseUrl && !analyticsUser) {
       issues.push('COMMERCE_ANALYTICS_DATABASE_URL 必须是有效 PostgreSQL URL。');

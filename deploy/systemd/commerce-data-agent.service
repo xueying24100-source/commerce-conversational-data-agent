@@ -8,8 +8,10 @@ Type=simple
 User=commerce
 Group=commerce
 WorkingDirectory=/opt/commerce-data-agent/current
-EnvironmentFile=/etc/commerce-data-agent/commerce-agent.env
+EnvironmentFile=/etc/commerce-data-agent/commerce-common.env
+EnvironmentFile=/etc/commerce-data-agent/commerce-web.env
 Environment=NODE_ENV=production
+Environment=COMMERCE_RUNTIME_ROLE=web
 Environment=HOSTNAME=127.0.0.1
 Environment=PORT=3000
 Environment=PATH=/usr/local/bin:/usr/bin:/bin

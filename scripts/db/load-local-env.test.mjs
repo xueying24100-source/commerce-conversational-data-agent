@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 const { loadLocalEnv } = require('./load-local-env.js');
 
 const names = [
+  'COMMERCE_DISABLE_LOCAL_ENV_FILES',
   'COMMERCE_DATABASE_URL',
   'COMMERCE_ANALYTICS_DATABASE_URL',
   'COMMERCE_CONTROL_MIGRATION_DATABASE_URL',
@@ -39,6 +40,17 @@ function environmentRoot(local, release) {
 }
 
 describe('local environment loading', () => {
+  it('can disable local env-file loading for isolated release subprocesses', () => {
+    names.forEach((name) => delete process.env[name]);
+    process.env.COMMERCE_DISABLE_LOCAL_ENV_FILES = '1';
+    loadLocalEnv(environmentRoot(
+      'COMMERCE_DATABASE_URL=postgresql://control:secret@127.0.0.1:5432/control\n',
+      'COMMERCE_ANALYTICS_INGEST_DATABASE_URL=postgresql://ingest:secret@127.0.0.1:5432/analytics\n',
+    ));
+    expect(process.env.COMMERCE_DATABASE_URL).toBeUndefined();
+    expect(process.env.COMMERCE_ANALYTICS_INGEST_DATABASE_URL).toBeUndefined();
+  });
+
   it('loads both local files and maps a loopback disposable database', () => {
     names.forEach((name) => delete process.env[name]);
     const url = 'postgresql://commerce:password@127.0.0.1:35433/commerce_agent';

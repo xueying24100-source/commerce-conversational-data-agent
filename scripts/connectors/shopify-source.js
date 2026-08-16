@@ -8,6 +8,7 @@ const SHOPIFY_AVAILABLE_METRICS = [
 const PAID_STATUSES = new Set(['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED', 'REFUNDED']);
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const RETRYABLE_GRAPHQL_CODES = new Set(['THROTTLED', 'INTERNAL_SERVER_ERROR']);
+const SHOPIFY_ALL_ORDERS_WINDOW_MS = 60 * 24 * 60 * 60 * 1_000;
 
 const SHOPIFY_ORDERS_QUERY = `query CommerceOrders(
   $first: Int!
@@ -63,7 +64,7 @@ function isoTimestamp(value, name) {
   return date.toISOString();
 }
 
-function businessDate(value, timeZone) {
+function businessDateTime(value, timeZone) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error('Shopify returned an invalid timestamp.');
   const parts = new Intl.DateTimeFormat('en', {
@@ -71,15 +72,59 @@ function businessDate(value, timeZone) {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
   }).formatToParts(date);
   const part = (type) => parts.find((entry) => entry.type === type)?.value;
-  return `${part('year')}-${part('month')}-${part('day')}`;
+  return {
+    date: `${part('year')}-${part('month')}-${part('day')}`,
+    hour: part('hour'),
+    minute: part('minute'),
+    second: part('second'),
+    millisecond: date.getUTCMilliseconds(),
+  };
+}
+
+function businessDate(value, timeZone) {
+  return businessDateTime(value, timeZone).date;
+}
+
+function fullHistoryCoverageStart(value, timeZone) {
+  const local = businessDateTime(value, timeZone);
+  if (
+    local.hour !== '00'
+    || local.minute !== '00'
+    || local.second !== '00'
+    || local.millisecond !== 0
+  ) {
+    throw new Error(
+      'Shopify full-history initialUpdatedAt must be exactly midnight in source.businessTimeZone.',
+    );
+  }
+  return local.date;
+}
+
+function previousCompleteBusinessDate(value, timeZone) {
+  const current = businessDate(value, timeZone);
+  const calendar = new Date(`${current}T00:00:00.000Z`);
+  calendar.setUTCDate(calendar.getUTCDate() - 1);
+  return calendar.toISOString().slice(0, 10);
 }
 
 function money(value, name) {
   const parsed = Number(value?.amount);
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`Shopify ${name} is invalid.`);
   return parsed;
+}
+
+function moneyCurrency(value, name) {
+  const normalized = String(value?.currencyCode || '').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/u.test(normalized)) {
+    throw new Error(`Shopify ${name} currencyCode is invalid or missing.`);
+  }
+  return normalized;
 }
 
 function integer(value, name) {
@@ -92,43 +137,31 @@ function roundMoney(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-function addRow(rows, dimensions, metrics, sourceUpdatedAt) {
-  const key = [
-    dimensions.metric_date,
-    dimensions.region,
-    dimensions.channel,
-    dimensions.sku,
-    dimensions.category,
-  ].join('\u001f');
-  const existing = rows.get(key) || {
-    ...dimensions,
-    business_timezone: dimensions.business_timezone,
-    visits: 0,
-    paid_orders: 0,
-    units: 0,
-    gmv: 0,
-    refund_orders: 0,
-    refund_amount: 0,
-    cost_amount: 0,
-    ad_spend: 0,
-    new_customers: 0,
-    stockout_hours: 0,
-    ending_inventory: 0,
-    available_metrics: [...SHOPIFY_AVAILABLE_METRICS],
-    data_mode: 'incremental',
-    source_updated_at: sourceUpdatedAt,
-  };
-  for (const [name, value] of Object.entries(metrics)) existing[name] += value;
-  existing.gmv = roundMoney(existing.gmv);
-  existing.refund_amount = roundMoney(existing.refund_amount);
-  if (sourceUpdatedAt > existing.source_updated_at) existing.source_updated_at = sourceUpdatedAt;
-  rows.set(key, existing);
-}
-
+// Emits one fact row per Shopify order (its paid contribution) and one per refund, each
+// tagged with a stable source_line_id. This intentionally does NOT pre-aggregate into daily
+// buckets here: a partial incremental window must only ever add or update the specific
+// order/refund lines it observed, never overwrite a shared (date, region, channel, sku)
+// bucket with a partial sum. Bucket aggregation happens downstream in
+// recomputeDailyMetricsFromSourceFacts, which re-sums the *complete* staged history for
+// every bucket a run touches, so a window that only sees 1 of N historical orders for a
+// bucket can no longer erase the other N-1 orders' contribution.
 function normalizeShopifyOrders(orders, source) {
-  const rows = new Map();
+  const factRows = [];
+  const sourceEntities = [];
+  const currencies = new Set();
   for (const order of orders) {
-    if (!order || order.test === true) continue;
+    if (!order || typeof order !== 'object' || Array.isArray(order)) {
+      throw new Error('Shopify returned an invalid order node.');
+    }
+    const orderId = requiredString(order.id, 'order.id');
+    const sourceLineIds = [];
+    // Test orders are still emitted as observed entities with zero active lines. If an order
+    // is reclassified as test after a previous import, entity reconciliation removes its old
+    // production contribution instead of silently retaining it.
+    if (order.test === true) {
+      sourceEntities.push({ source_entity_id: orderId, source_line_ids: sourceLineIds });
+      continue;
+    }
     if (order.lineItems?.pageInfo?.hasNextPage) {
       throw new Error('Shopify order has more than 100 line items; use Bulk Operations for this store.');
     }
@@ -149,35 +182,67 @@ function normalizeShopifyOrders(orders, source) {
         (sum, line) => sum + integer(line.quantity, 'line item quantity'),
         0,
       );
-      const gmv = lineItems.reduce(
+      const gmv = roundMoney(lineItems.reduce(
         (sum, line) => sum + money(line.discountedTotalSet?.shopMoney, 'line item total'),
         0,
-      );
-      addRow(rows, {
+      ));
+      let lineCurrency;
+      for (const line of lineItems) {
+        lineCurrency = moneyCurrency(line.discountedTotalSet?.shopMoney, 'line item total');
+        currencies.add(lineCurrency);
+      }
+      const sourceLineId = `order:${orderId}`;
+      sourceLineIds.push(sourceLineId);
+      factRows.push({
         ...dimensions,
+        source_entity_id: orderId,
+        source_line_id: sourceLineId,
         metric_date: businessDate(order.createdAt, source.businessTimeZone),
-      }, {
+        currency_code: lineCurrency,
         paid_orders: 1,
         units,
         gmv,
-      }, updatedAt);
+        refund_amount: 0,
+        source_updated_at: updatedAt,
+      });
     }
-    for (const refund of order.refunds || []) {
+    (order.refunds || []).forEach((refund, index) => {
       const refundAmount = money(refund.totalRefundedSet?.shopMoney, 'refund total');
-      if (refundAmount === 0) continue;
-      addRow(rows, {
+      if (refundAmount === 0) return;
+      const refundCurrency = moneyCurrency(refund.totalRefundedSet?.shopMoney, 'refund total');
+      currencies.add(refundCurrency);
+      const refundId = requiredString(String(refund.id ?? index), 'refund.id');
+      const sourceLineId = `refund:${orderId}:${refundId}`;
+      sourceLineIds.push(sourceLineId);
+      factRows.push({
         ...dimensions,
+        source_entity_id: orderId,
+        source_line_id: sourceLineId,
         metric_date: businessDate(refund.createdAt, source.businessTimeZone),
-      }, {
-        refund_amount: refundAmount,
-      }, updatedAt);
-    }
+        currency_code: refundCurrency,
+        paid_orders: 0,
+        units: 0,
+        gmv: 0,
+        refund_amount: roundMoney(refundAmount),
+        source_updated_at: updatedAt,
+      });
+    });
+    sourceEntities.push({ source_entity_id: orderId, source_line_ids: sourceLineIds });
   }
-  return [...rows.values()].sort((left, right) => (
+  if (currencies.size > 1) {
+    throw new Error(
+      `Shopify returned multiple currencies in one connector run (${[...currencies].sort().join(', ')}); `
+      + 'multi-currency ingestion is not supported.',
+    );
+  }
+  factRows.sort((left, right) => (
     left.metric_date.localeCompare(right.metric_date)
     || left.region.localeCompare(right.region)
     || left.channel.localeCompare(right.channel)
+    || left.source_line_id.localeCompare(right.source_line_id)
   ));
+  sourceEntities.sort((left, right) => left.source_entity_id.localeCompare(right.source_entity_id));
+  return { factRows, sourceEntities };
 }
 
 function retryAfterMs(response) {
@@ -248,6 +313,37 @@ async function fetchPage(input) {
   throw lastError;
 }
 
+async function assertReadAllOrdersScope(input) {
+  const response = await input.fetchImpl(input.url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'X-Shopify-Access-Token': input.accessToken,
+    },
+    signal: AbortSignal.timeout(input.timeoutMs),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Shopify access scope verification failed with HTTP ${response.status}; refusing full-history coverage.`,
+    );
+  }
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new Error('Shopify access scope verification returned invalid JSON; refusing full-history coverage.');
+  }
+  const handles = Array.isArray(payload?.access_scopes)
+    ? payload.access_scopes.map((scope) => String(scope?.handle || '').trim())
+    : [];
+  if (!handles.includes('read_all_orders')) {
+    throw new Error(
+      'Shopify full-history reconciliation older than 60 days requires the read_all_orders scope.',
+    );
+  }
+}
+
 function shopifySourceConfig(config) {
   const domainEnv = requiredString(
     config.shopDomainEnv || 'SHOPIFY_SHOP_DOMAIN',
@@ -302,17 +398,40 @@ function shopifySourceConfig(config) {
       config.orderCategory || 'All Products',
       'source.orderCategory',
     ),
+    fullHistoryReconciliation: config.fullHistoryReconciliation === true,
   };
 }
 
 async function loadShopifySource(config, checkpoint, limits, dependencies = {}) {
   const source = shopifySourceConfig(config);
+  if (source.fullHistoryReconciliation && checkpoint) {
+    throw new Error('Shopify fullHistoryReconciliation is a one-time empty-checkpoint bootstrap only.');
+  }
+  const coverageStart = source.fullHistoryReconciliation
+    ? fullHistoryCoverageStart(source.initialUpdatedAt, source.businessTimeZone)
+    : null;
   const lower = checkpoint ? isoTimestamp(checkpoint, 'Shopify checkpoint') : source.initialUpdatedAt;
   const upper = (dependencies.now || (() => new Date()))().toISOString();
   if (lower > upper) throw new Error('Shopify checkpoint cannot be later than the current watermark.');
-  const url = `https://${source.shopDomain}/admin/api/${source.apiVersion}/graphql.json`;
+  const coverageEnd = previousCompleteBusinessDate(upper, source.businessTimeZone);
+  if (coverageStart && coverageEnd < coverageStart) {
+    throw new Error('Shopify full-history reconciliation requires at least one complete business day.');
+  }
+  const adminApiBase = `https://${source.shopDomain}/admin/api/${source.apiVersion}`;
+  const url = `${adminApiBase}/graphql.json`;
   const fetchImpl = dependencies.fetchImpl || fetch;
   const sleepImpl = dependencies.sleepImpl || ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
+  if (
+    source.fullHistoryReconciliation
+    && Date.parse(upper) - Date.parse(source.initialUpdatedAt) > SHOPIFY_ALL_ORDERS_WINDOW_MS
+  ) {
+    await assertReadAllOrdersScope({
+      url: `https://${source.shopDomain}/admin/oauth/access_scopes.json`,
+      accessToken: source.accessToken,
+      timeoutMs: limits.timeoutMs,
+      fetchImpl,
+    });
+  }
   const query = `updated_at:>='${lower}' updated_at:<='${upper}'`;
   const orders = [];
   let cursor = null;
@@ -336,18 +455,34 @@ async function loadShopifySource(config, checkpoint, limits, dependencies = {}) 
     if (!cursor) throw new Error('Shopify pagination did not provide endCursor.');
     if (page === source.maxPages) throw new Error('Shopify connector exceeded source.maxPages.');
   }
-  const records = normalizeShopifyOrders(orders, source);
-  if (records.length > limits.maxRows) throw new Error(`Shopify connector exceeded maxRows=${limits.maxRows}.`);
-  const body = JSON.stringify(records);
+  if (orders.length > limits.maxRows) throw new Error(`Shopify connector exceeded maxRows=${limits.maxRows}.`);
+  const { factRows, sourceEntities } = normalizeShopifyOrders(orders, source);
+  if (factRows.length > limits.maxRows) throw new Error(`Shopify connector exceeded maxRows=${limits.maxRows}.`);
+  const body = JSON.stringify({ factRows, sourceEntities });
   if (Buffer.byteLength(body, 'utf8') > limits.maxBytes) {
     throw new Error('Normalized Shopify records exceeded maxBytes.');
   }
   return {
     body,
-    records,
+    factRows,
+    sourceEntities,
     checkpointAfter: upper,
     transport: 'shopify',
     sourceRows: orders.length,
+    ...(source.fullHistoryReconciliation ? {
+      coverageProof: {
+        kind: 'full_history_reconciliation',
+        coverageStart,
+        coverageEnd,
+        sourceUpdatedAt: upper,
+      },
+    } : checkpoint ? {
+      coverageProof: {
+        kind: 'coordinated_incremental_scan',
+        coverageEnd,
+        sourceUpdatedAt: upper,
+      },
+    } : {}),
   };
 }
 

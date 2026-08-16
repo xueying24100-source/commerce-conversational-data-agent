@@ -38,11 +38,48 @@ class ScriptedDatabase implements CommerceDatabase {
     values: readonly unknown[] = [],
   ): Promise<CommerceQueryResult<Row>> {
     this.queries.push(text);
+    if (text.includes("set_config('commerce.control_system'")) {
+      return result() as CommerceQueryResult<Row>;
+    }
     return this.execute(text, values) as CommerceQueryResult<Row>;
   }
 
   transaction<T>(work: (client: CommerceSqlClient) => Promise<T>): Promise<T> {
     return work(this);
+  }
+
+  async ping(): Promise<void> {}
+}
+
+class TransactionOnlyDatabase implements CommerceDatabase {
+  readonly queries: string[] = [];
+  transactionCount = 0;
+  private inTransaction = false;
+
+  constructor(
+    private readonly execute: (
+      text: string,
+      values: readonly unknown[],
+    ) => CommerceQueryResult<Record<string, unknown>>,
+  ) {}
+
+  async query<Row extends Record<string, unknown>>(
+    text: string,
+    values: readonly unknown[] = [],
+  ): Promise<CommerceQueryResult<Row>> {
+    if (!this.inTransaction) throw new Error('completeTurn issued a query outside its transaction.');
+    this.queries.push(text);
+    return this.execute(text, values) as CommerceQueryResult<Row>;
+  }
+
+  async transaction<T>(work: (client: CommerceSqlClient) => Promise<T>): Promise<T> {
+    this.transactionCount += 1;
+    this.inTransaction = true;
+    try {
+      return await work(this);
+    } finally {
+      this.inTransaction = false;
+    }
   }
 
   async ping(): Promise<void> {}
@@ -160,6 +197,210 @@ describe('PostgreSQL Commerce conversation claims', () => {
       { role: 'user', runStatus: 'completed' },
       { role: 'assistant', runStatus: 'completed' },
     ]);
+  });
+
+  it('only marks messages with a persisted immutable report as downloadable', async () => {
+    const database = new ScriptedDatabase((text) => {
+      if (text.includes('FROM commerce_agent_conversations')) {
+        return result([{
+          id: 'conv_1',
+          title: 'Conversation',
+          model: 'deepseek-v4-flash',
+          created_at: new Date('2026-08-13T00:00:00.000Z'),
+          updated_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_messages AS message')) {
+        expect(text).toContain('FROM commerce_agent_reports AS report');
+        return result([{
+          id: 'msg_assistant',
+          role: 'assistant',
+          content: '已完成。',
+          answer_json: null,
+          run_id: null,
+          run_status: 'completed',
+          report_available: true,
+          created_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_action_events')) return result();
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    });
+    const store = new PostgresCommerceConversationStore(database);
+
+    const conversation = await store.getConversation(identity, 'conv_1');
+
+    expect(conversation?.messages).toEqual([
+      expect.objectContaining({ id: 'msg_assistant', reportAvailable: true }),
+    ]);
+  });
+
+  it('restores the latest action commitment and execution note with the conversation', async () => {
+    const database = new ScriptedDatabase((text) => {
+      if (text.includes('FROM commerce_agent_conversations')) {
+        return result([{
+          id: 'conv_1',
+          title: 'Conversation',
+          model: 'deepseek-v4-flash',
+          created_at: new Date('2026-08-13T00:00:00.000Z'),
+          updated_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_messages AS message')) {
+        return result([{
+          id: 'msg_assistant',
+          role: 'assistant',
+          content: '已完成。',
+          answer_json: null,
+          run_id: 'run_1',
+          run_status: 'completed',
+          report_available: false,
+          created_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_evidence')) return result();
+      if (text.includes('FROM commerce_agent_action_events')) {
+        return result([{
+          message_id: 'msg_assistant',
+          action_id: `action_${'a'.repeat(24)}`,
+          event_type: 'blocked',
+          version: 3,
+          details_json: {
+            commitment: {
+              assignee: '运营团队',
+              dueDate: '2026-08-20',
+              target: 120,
+              evaluationWindowDays: 7,
+            },
+            note: '等待库存到货。',
+          },
+          created_at: new Date('2026-08-13T00:00:02.000Z'),
+        }]);
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    });
+
+    const conversation = await new PostgresCommerceConversationStore(database)
+      .getConversation(identity, 'conv_1');
+
+    expect(conversation?.messages[0]?.actionStates).toEqual([{
+      actionId: `action_${'a'.repeat(24)}`,
+      status: 'blocked',
+      version: 3,
+      updatedAt: '2026-08-13T00:00:02.000Z',
+      commitment: {
+        assignee: '运营团队',
+        dueDate: '2026-08-20',
+        target: 120,
+        evaluationWindowDays: 7,
+      },
+      lastNote: '等待库存到货。',
+    }]);
+  });
+
+  it('returns a safe persisted failure diagnosis without exposing the raw provider error', async () => {
+    const database = new ScriptedDatabase((text) => {
+      if (text.includes('FROM commerce_agent_conversations')) {
+        return result([{
+          id: 'conv_1', title: 'Conversation', model: 'deepseek-v4-flash',
+          created_at: new Date('2026-08-13T00:00:00.000Z'),
+          updated_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_messages AS message')) {
+        return result([{
+          id: 'msg_user', role: 'user', content: '分析昨日经营。', answer_json: null,
+          run_id: 'run_failed', run_status: 'failed', run_error_code: 'MODEL_TIMEOUT',
+          run_error_message: 'secret upstream host timed out', report_available: false,
+          created_at: new Date('2026-08-13T00:00:01.000Z'),
+        }]);
+      }
+      if (text.includes('FROM commerce_agent_evidence')) return result();
+      if (text.includes('FROM commerce_agent_action_events')) return result();
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    });
+
+    const conversation = await new PostgresCommerceConversationStore(database)
+      .getConversation(identity, 'conv_1');
+
+    expect(conversation?.messages[0]).toMatchObject({
+      runStatus: 'failed',
+      runError: {
+        code: 'MODEL_TIMEOUT',
+        message: '模型或数据查询响应超时，本次没有生成回答。',
+        retryable: true,
+      },
+    });
+    expect(JSON.stringify(conversation)).not.toContain('secret upstream host');
+  });
+
+  it('persists the completed run, answer, evidence, and immutable report in one transaction', async () => {
+    const database = new TransactionOnlyDatabase((text, values) => {
+      if (text.includes('UPDATE commerce_agent_runs')) {
+        return result([{
+          id: 'run_1',
+          request_id: 'req_12345678',
+          request_sha256: REQUEST_HASH,
+          model: 'deepseek-v4-flash',
+          provider: 'deepseek',
+          started_at: new Date('2026-08-13T00:00:00.000Z'),
+          completed_at: new Date('2026-08-13T00:00:02.000Z'),
+        }]);
+      }
+      if (text.includes('SELECT conversation.title')) {
+        return result([{
+          title: 'Conversation',
+          question_id: 'msg_question',
+          question_content: '查看 GMV',
+          question_created_at: new Date('2026-08-13T00:00:00.000Z'),
+        }]);
+      }
+      if (text.includes('INSERT INTO commerce_agent_messages')) {
+        return result([{ created_at: new Date('2026-08-13T00:00:02.000Z') }]);
+      }
+      if (text.includes('INSERT INTO commerce_agent_evidence')) return result();
+      if (text.includes('INSERT INTO commerce_agent_reports')) {
+        return result([{ content_sha256: values[8] }]);
+      }
+      if (text.includes('UPDATE commerce_agent_conversations')) return result();
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    });
+    const store = new PostgresCommerceConversationStore(database);
+
+    await store.completeTurn({
+      identity,
+      conversationId: 'conv_1',
+      runId: 'run_1',
+      generation: 1,
+      assistantMessageId: 'msg_answer',
+      answer: {
+        status: 'answered',
+        answer: 'GMV 为 100。',
+        answerClaims: [],
+        findings: [],
+        recommendations: [],
+        followUps: [],
+      },
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      traces: [{
+        evidenceId: 'evidence_1',
+        operation: 'commerce_totals',
+        fetchedAt: '2026-08-13T00:00:01.000Z',
+        rowCount: 1,
+        requestSha256: `sha256:${'b'.repeat(64)}`,
+        responseSha256: `sha256:${'c'.repeat(64)}`,
+        sourceWatermark: null,
+        request: { metrics: ['gmv'] },
+        preview: { totals: { gmv: 100 } },
+        previewTruncated: false,
+      }],
+    });
+
+    expect(database.transactionCount).toBe(1);
+    const evidenceIndex = database.queries.findIndex((query) => query.includes('INSERT INTO commerce_agent_evidence'));
+    const reportIndex = database.queries.findIndex((query) => query.includes('INSERT INTO commerce_agent_reports'));
+    expect(evidenceIndex).toBeGreaterThan(-1);
+    expect(reportIndex).toBeGreaterThan(evidenceIndex);
   });
 
   it('rejects reuse of an idempotency key for a different payload', async () => {

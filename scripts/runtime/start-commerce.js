@@ -3,6 +3,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+
+process.env.COMMERCE_RUNTIME_ROLE ||= 'web';
+
 const { validateProductionEnvironment } = require('./production-env');
 
 const issues = validateProductionEnvironment(process.env);

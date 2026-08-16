@@ -1,0 +1,2 @@
+# Keep this aligned with the Chromium version recorded in browser release evidence.
+playwright==1.62.0

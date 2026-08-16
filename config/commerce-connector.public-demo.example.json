@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "connectorId": "olist-derived-public-demo",
+  "connectorVersion": "1.0.0",
+  "tenantId": "tenant_public_demo",
+  "sourceMode": "snapshot",
+  "coverage": {
+    "complete": true,
+    "start": "2018-01-01",
+    "end": "2018-05-20"
+  },
+  "maxRows": 2000,
+  "maxBytes": 10000000,
+  "source": {
+    "type": "commerce_fixture",
+    "fixtureId": "olist-same-source-derived-v1"
+  }
+}

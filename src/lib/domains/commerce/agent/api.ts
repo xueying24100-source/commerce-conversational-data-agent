@@ -7,7 +7,9 @@ import {
   CommerceIdempotencyConflictError,
 } from './conversation-store';
 import { CommerceModelConfigurationError } from './model-provider';
+import { CommerceModelBudgetConfigurationError } from './config';
 import { CommerceAgentRunError } from './runtime';
+import { CommerceReportNotFoundError } from './report-store';
 import {
   CommerceConversationNotFoundError,
   CommerceRateLimitError,
@@ -17,9 +19,38 @@ import {
 import { logCommerceFailure } from './telemetry';
 import {
   CommerceJobConflictError,
+  CommerceJobEnqueueDisabledError,
+  CommerceJobInvalidMessageError,
   CommerceJobNotFoundError,
   CommerceJobQueueFullError,
+  CommerceJobRateLimitError,
+  CommerceModelBudgetExceededError,
 } from './job-store';
+import { CommerceKillSwitchError } from './jobs';
+import {
+  CommerceFeedbackClaimNotFoundError,
+  CommerceFeedbackCursorError,
+  CommerceFeedbackIdempotencyConflictError,
+  CommerceFeedbackInvalidTransitionError,
+  CommerceFeedbackNotFoundError,
+  CommerceFeedbackTargetNotFoundError,
+  CommerceFeedbackVersionConflictError,
+} from './feedback-store';
+import {
+  CommerceActionIdempotencyConflictError,
+  CommerceActionInvalidTransitionError,
+  CommerceActionNotFoundError,
+  CommerceActionVersionConflictError,
+} from './action-store';
+import {
+  CommerceActionReviewIdempotencyConflictError,
+  CommerceActionReviewInvalidError,
+  CommerceActionReviewTargetNotFoundError,
+} from './action-review-store';
+import {
+  CommerceReportShareInvalidError,
+  CommerceReportShareNotFoundError,
+} from './report-share-store';
 
 export async function readCommerceJson(request: NextRequest): Promise<unknown> {
   const contentType = request.headers.get('content-type')?.toLowerCase() || '';
@@ -76,7 +107,22 @@ export function commerceApiError(error: unknown): NextResponse {
       { status: 400 },
     );
   }
-  if (error instanceof CommerceConversationNotFoundError) {
+  if (error instanceof CommerceFeedbackCursorError) {
+    return NextResponse.json(
+      { success: false, error: error.code, message: error.message, ...context },
+      { status: 400 },
+    );
+  }
+  if (
+    error instanceof CommerceConversationNotFoundError
+    || error instanceof CommerceFeedbackTargetNotFoundError
+    || error instanceof CommerceFeedbackClaimNotFoundError
+    || error instanceof CommerceFeedbackNotFoundError
+    || error instanceof CommerceActionNotFoundError
+    || error instanceof CommerceActionReviewTargetNotFoundError
+    || error instanceof CommerceReportNotFoundError
+    || error instanceof CommerceReportShareNotFoundError
+  ) {
     return NextResponse.json(
       { success: false, error: error.code, message: error.message, ...context },
       { status: 404 },
@@ -90,13 +136,27 @@ export function commerceApiError(error: unknown): NextResponse {
   }
   if (
     error instanceof CommerceIdempotencyConflictError
+    || error instanceof CommerceFeedbackIdempotencyConflictError
+    || error instanceof CommerceFeedbackVersionConflictError
+    || error instanceof CommerceFeedbackInvalidTransitionError
     || error instanceof CommerceJobConflictError
     || error instanceof CommerceConversationBusyError
     || error instanceof CommerceRequestStateError
+    || error instanceof CommerceActionIdempotencyConflictError
+    || error instanceof CommerceActionVersionConflictError
+    || error instanceof CommerceActionInvalidTransitionError
+    || error instanceof CommerceActionReviewIdempotencyConflictError
+    || error instanceof CommerceActionReviewInvalidError
   ) {
     return NextResponse.json(
       { success: false, error: error.code, message: error.message, ...context },
       { status: 409 },
+    );
+  }
+  if (error instanceof CommerceReportShareInvalidError) {
+    return NextResponse.json(
+      { success: false, error: error.code, message: error.message, ...context },
+      { status: 400 },
     );
   }
   if (error instanceof CommerceJobQueueFullError) {
@@ -105,13 +165,36 @@ export function commerceApiError(error: unknown): NextResponse {
       { status: 429, headers: { 'Retry-After': '10' } },
     );
   }
+  if (error instanceof CommerceJobRateLimitError) {
+    return NextResponse.json(
+      { success: false, error: error.code, message: error.message, scope: error.scope, ...context },
+      { status: 429, headers: { 'Retry-After': '3600' } },
+    );
+  }
+  if (error instanceof CommerceModelBudgetExceededError) {
+    return NextResponse.json(
+      { success: false, error: error.code, message: error.message, ...context },
+      { status: 429, headers: { 'Retry-After': '3600' } },
+    );
+  }
+  if (error instanceof CommerceJobInvalidMessageError) {
+    return NextResponse.json(
+      { success: false, error: error.code, message: error.message, ...context },
+      { status: 400 },
+    );
+  }
   if (error instanceof CommerceRateLimitError) {
     return NextResponse.json(
       { success: false, error: error.code, message: error.message, ...context },
       { status: 429, headers: { 'Retry-After': '60' } },
     );
   }
-  if (error instanceof CommerceModelConfigurationError) {
+  if (
+    error instanceof CommerceModelConfigurationError
+    || error instanceof CommerceModelBudgetConfigurationError
+    || error instanceof CommerceKillSwitchError
+    || error instanceof CommerceJobEnqueueDisabledError
+  ) {
     return NextResponse.json(
       { success: false, error: error.code, message: error.message, ...context },
       { status: 503 },

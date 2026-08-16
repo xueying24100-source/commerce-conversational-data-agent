@@ -3,6 +3,12 @@
   "connectorId": "orders-daily-jsonl",
   "connectorVersion": "1.0.0",
   "tenantId": "tenant_acme",
+  "sourceMode": "snapshot",
+  "coverage": {
+    "complete": true,
+    "start": "2026-07-01",
+    "end": "2026-07-31"
+  },
   "format": "jsonl",
   "maxRows": 1000000,
   "maxBytes": 100000000,

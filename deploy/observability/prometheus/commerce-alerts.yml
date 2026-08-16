@@ -37,6 +37,53 @@ groups:
           summary: Commerce Data Agent has dead-letter Jobs
           description: At least one retryable Job exhausted all configured attempts.
 
+      - alert: CommerceAgentSuccessRatioLow
+        expr: commerce_agent_success_ratio < 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce Agent success ratio is below 90%
+          description: Retained terminal Runs have completed successfully less than 90% of the time.
+
+      - alert: CommerceModelBudgetNearLimit
+        expr: |
+          sum(commerce_agent_model_budget_usd{kind=~"reserved|spent"})
+          / scalar(commerce_agent_model_budget_usd{kind="limit"}) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce daily model budget is more than 80% allocated
+          description: New Jobs may soon fail closed at the pre-model budget reservation gate.
+
+      - alert: CommerceFeishuDeliveryUnknown
+        expr: commerce_feishu_notifications{status="delivery_unknown"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commerce Feishu delivery requires reconciliation
+          description: At least one command may have reached Feishu and must not be retried blindly.
+
+      - alert: CommerceActionReviewBacklog
+        expr: commerce_action_review_backlog{status="waiting"} > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commerce action review backlog is elevated
+          description: More than 20 completed actions are waiting for wall-clock or watermark readiness.
+
+      - alert: CommerceWeeklyDiagnosisFailed
+        expr: commerce_weekly_diagnosis_runs{status="failed"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A canonical weekly diagnosis failed
+          description: Inspect the linked durable Job before requesting an explicit correction revision.
+
       - alert: CommerceConnectorLatestRunFailed
         expr: commerce_connector_last_run_status{status="failed"} == 1
         for: 5m

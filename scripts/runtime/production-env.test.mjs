@@ -7,7 +7,8 @@ const { validateProductionEnvironment } = require('./production-env.js');
 const valid = {
   NODE_ENV: 'production',
   COMMERCE_RELEASE_REVISION: '0123456789abcdef0123456789abcdef01234567',
-  COMMERCE_DATABASE_URL: 'postgresql://control_user:control_password@db.internal:5432/control',
+  COMMERCE_RUNTIME_ROLE: 'web',
+  COMMERCE_CONTROL_API_DATABASE_URL: 'postgresql://commerce_control_api_user:control_password@db.internal:5432/control',
   COMMERCE_ANALYTICS_DATABASE_URL: 'postgresql://analytics_reader:analytics_password@warehouse.internal:5432/analytics',
   COMMERCE_PG_SSL: '1',
   COMMERCE_PG_REJECT_UNAUTHORIZED: '1',
@@ -21,6 +22,7 @@ const valid = {
   COMMERCE_JOB_RETRY_BASE_MS: '2000',
   COMMERCE_JOB_RETRY_MAX_MS: '60000',
   COMMERCE_WORKER_STALE_MS: '30000',
+  COMMERCE_RETENTION_DAYS: '90',
   COMMERCE_MAX_QUEUED_JOBS_PER_USER: '8',
   COMMERCE_JOB_MAX_ATTEMPTS: '3',
   COMMERCE_PUBLIC_ORIGIN: 'https://commerce.internal.company',
@@ -28,7 +30,7 @@ const valid = {
   COMMERCE_METRICS_TOKEN: 'metrics-production-token-material-0123456789',
   COMMERCE_DEV_AUTH_BYPASS: '0',
   COMMERCE_LLM_AGENT_ENABLED: '1',
-  DEEPSEEK_API_KEY: 'sk-valid-production-key-material',
+  DEEPSEEK_API_KEY: 'fixture-valid-production-provider-material',
 };
 
 describe('Commerce production startup gate', () => {
@@ -39,7 +41,7 @@ describe('Commerce production startup gate', () => {
   it('rejects documented placeholders, shared database roles and disabled TLS', () => {
     const issues = validateProductionEnvironment({
       ...valid,
-      COMMERCE_ANALYTICS_DATABASE_URL: valid.COMMERCE_DATABASE_URL,
+      COMMERCE_ANALYTICS_DATABASE_URL: valid.COMMERCE_CONTROL_API_DATABASE_URL,
       COMMERCE_PG_SSL: '0',
       COMMERCE_TRUSTED_PROXY_SECRET: 'replace-with-at-least-32-random-characters',
       DEEPSEEK_API_KEY: 'replace-with-deepseek-api-key',
@@ -50,6 +52,21 @@ describe('Commerce production startup gate', () => {
       expect.stringContaining('COMMERCE_PG_SSL'),
       expect.stringContaining('COMMERCE_TRUSTED_PROXY_SECRET'),
       expect.stringContaining('MODELPORT_API_KEY or DEEPSEEK_API_KEY'),
+    ]));
+  });
+
+  it('selects the dedicated Worker URL and rejects role substitution', () => {
+    expect(validateProductionEnvironment({
+      ...valid,
+      COMMERCE_RUNTIME_ROLE: 'worker',
+      COMMERCE_CONTROL_WORKER_DATABASE_URL: 'postgresql://commerce_control_worker_user:control_password@db.internal:5432/control',
+    })).toEqual([]);
+
+    expect(validateProductionEnvironment({
+      ...valid,
+      COMMERCE_CONTROL_API_DATABASE_URL: 'postgresql://commerce_control_worker_user:control_password@db.internal:5432/control',
+    })).toEqual(expect.arrayContaining([
+      expect.stringContaining('commerce_control_api_user'),
     ]));
   });
 
@@ -101,6 +118,17 @@ describe('Commerce production startup gate', () => {
     ]));
   });
 
+  it('rejects a prepared context reservation above the runtime ceiling', () => {
+    const issues = validateProductionEnvironment({
+      ...valid,
+      COMMERCE_AGENT_MAX_PREPARED_INPUT_TOKENS: '400001',
+    });
+
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('MAX_PREPARED_INPUT_TOKENS'),
+    ]));
+  });
+
   it('rejects a retry ceiling below the retry base', () => {
     const issues = validateProductionEnvironment({
       ...valid,
@@ -110,5 +138,16 @@ describe('Commerce production startup gate', () => {
     expect(issues).toEqual(expect.arrayContaining([
       expect.stringContaining('COMMERCE_JOB_RETRY_MAX_MS'),
     ]));
+  });
+
+  it('requires an explicit bounded audit retention policy', () => {
+    const missing = { ...valid };
+    delete missing.COMMERCE_RETENTION_DAYS;
+    expect(validateProductionEnvironment(missing)).toEqual(expect.arrayContaining([
+      expect.stringContaining('COMMERCE_RETENTION_DAYS'),
+    ]));
+    expect(validateProductionEnvironment({ ...valid, COMMERCE_RETENTION_DAYS: '3' })).toEqual(
+      expect.arrayContaining([expect.stringContaining('COMMERCE_RETENTION_DAYS')]),
+    );
   });
 });

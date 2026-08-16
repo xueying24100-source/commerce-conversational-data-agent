@@ -3,12 +3,36 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ token: 'metrics-secret-material-0123456789' }));
 
 vi.mock('./config', () => ({
-  getCommerceAgentRuntimeConfig: () => ({ metricsToken: state.token }),
+  getCommerceAgentRuntimeConfig: () => ({
+    metricsToken: state.token,
+    workerStaleMs: 60_000,
+    dailyModelBudgetUsd: 25,
+  }),
 }));
 
 vi.mock('./database', () => ({
+  withCommerceControlSystem: async <T>(work: () => Promise<T>) => work(),
   getCommerceControlDatabase: () => ({
     query: async (sql: string) => {
+      if (sql.includes('commerce_collect_control_metrics')) {
+        return {
+          rows: [{
+            snapshot: {
+              jobs: [{ status: 'queued', count: 2 }],
+              runs: [{ status: 'completed', count: 3, duration_sum: 12, duration_count: 3 }],
+              totals: { input_tokens: 10, output_tokens: 5, total_tokens: 15, evidence_count: 4 },
+              workers: { active: 1 },
+              queue: { depth: 2, oldest_seconds: 7 },
+              tool_calls: [{ operation: 'commerce.scan_weekly_kpis', count: 7 }],
+              model_budget: { reserved_usd: 1.25, spent_usd: 2.5 },
+              notifications: [{ status: 'delivered', count: 4 }],
+              review_schedules: [{ status: 'waiting', count: 3 }],
+              weekly_diagnoses: [{ status: 'completed', count: 2 }],
+            },
+          }],
+          rowCount: 1,
+        };
+      }
       if (sql.includes('FROM commerce_agent_jobs GROUP BY')) {
         return { rows: [{ status: 'queued', count: 2 }], rowCount: 1 };
       }
@@ -26,6 +50,21 @@ vi.mock('./database', () => ({
       }
       if (sql.includes('commerce_agent_workers')) {
         return { rows: [{ active: 1 }], rowCount: 1 };
+      }
+      if (sql.includes('GROUP BY operation')) {
+        return { rows: [{ operation: 'commerce.scan_weekly_kpis', count: 7 }], rowCount: 1 };
+      }
+      if (sql.includes('commerce_agent_model_budget_daily')) {
+        return { rows: [{ reserved_usd: 1.25, spent_usd: 2.5 }], rowCount: 1 };
+      }
+      if (sql.includes('commerce_feishu_notification_outbox')) {
+        return { rows: [{ status: 'delivered', count: 4 }], rowCount: 1 };
+      }
+      if (sql.includes('commerce_action_review_schedules')) {
+        return { rows: [{ status: 'waiting', count: 3 }], rowCount: 1 };
+      }
+      if (sql.includes('commerce_weekly_diagnosis_runs')) {
+        return { rows: [{ status: 'completed', count: 2 }], rowCount: 1 };
       }
       return { rows: [{ depth: 2, oldest_seconds: 7 }], rowCount: 1 };
     },
@@ -83,6 +122,12 @@ describe('Commerce Prometheus metrics', () => {
     expect(output).toContain('commerce_agent_tokens{type="total"} 15');
     expect(output).toContain('commerce_agent_workers 1');
     expect(output).toContain('commerce_agent_queue_oldest_seconds 7');
+    expect(output).toContain('commerce_agent_success_ratio 1');
+    expect(output).toContain('commerce_agent_tool_calls{operation="commerce.scan_weekly_kpis"} 7');
+    expect(output).toContain('commerce_agent_model_budget_usd{kind="limit"} 25');
+    expect(output).toContain('commerce_feishu_notifications{status="delivered"} 4');
+    expect(output).toContain('commerce_action_review_backlog{status="waiting"} 3');
+    expect(output).toContain('commerce_weekly_diagnosis_runs{status="completed"} 2');
   });
 
   it('projects Connector health only inside an explicit tenant RLS scope', async () => {

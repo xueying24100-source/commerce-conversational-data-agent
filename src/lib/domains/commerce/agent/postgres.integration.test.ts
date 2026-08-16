@@ -27,6 +27,9 @@ const { loadShopifySource } = require('../../../../../scripts/connectors/shopify
 const {
   runCommerceConnector,
 } = require('../../../../../scripts/connectors/run-commerce-connector.js');
+const {
+  publishCommerceCoverage,
+} = require('../../../../../scripts/db/commerce-ingest-core.js');
 
 const connectionString = process.env.COMMERCE_TEST_DATABASE_URL;
 if (!connectionString) {
@@ -167,6 +170,46 @@ async function withAnalyticsTenant<T>(
   }
 }
 
+async function publishFixtureCoverage(
+  client: CommerceSqlClient,
+  input: {
+    tenantId: string;
+    connectorId: string;
+    coverageStart: string;
+    coverageEnd: string;
+    sourceUpdatedAt?: string;
+  },
+): Promise<void> {
+  const runId = `fixture_coverage_${randomUUID()}`;
+  await client.query(
+    `INSERT INTO commerce_connector_checkpoints
+       (tenant_id, connector_id, connector_version, data_mode, source_fact_state,
+        checkpoint, updated_at)
+     VALUES ($1, $2, '1.0.0', 'snapshot', 'not_applicable', $3, NOW())
+     ON CONFLICT (tenant_id, connector_id) DO UPDATE SET
+       connector_version = EXCLUDED.connector_version,
+       data_mode = EXCLUDED.data_mode,
+       source_fact_state = EXCLUDED.source_fact_state,
+       checkpoint = EXCLUDED.checkpoint,
+       updated_at = NOW()`,
+    [input.tenantId, input.connectorId, runId],
+  );
+  await publishCommerceCoverage(
+    client,
+    input.tenantId,
+    input.connectorId,
+    'snapshot',
+    runId,
+    {
+      kind: 'complete_snapshot',
+      coverageStart: input.coverageStart,
+      coverageEnd: input.coverageEnd,
+      sourceUpdatedAt: input.sourceUpdatedAt || `${input.coverageEnd}T23:59:59.000Z`,
+    },
+  );
+  await client.query('SELECT commerce_refresh_tenant_catalog($1)', [input.tenantId]);
+}
+
 beforeAll(async () => {
   const control = fs.readFileSync(path.join(root, 'migrations', 'commerce-control.sql'), 'utf8');
   const analytics = fs.readFileSync(path.join(root, 'migrations', 'commerce-analytics.sql'), 'utf8');
@@ -220,6 +263,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         answer: null,
         runId: null,
         runStatus: null,
+        reportAvailable: false,
         traces: [],
         createdAt: now,
       },
@@ -230,6 +274,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         answer: null,
         runId: null,
         runStatus: 'completed',
+        reportAvailable: false,
         traces: [],
         createdAt: now,
       },
@@ -309,6 +354,62 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
     }
   });
 
+  it('reaps lease-expired Jobs by the same requeue/dead-letter rule the retention cleanup script uses', async () => {
+    const suffix = randomUUID();
+    const operator = identity(`tenant_job_reap_${suffix}`, `user_job_reap_${suffix}`);
+    const jobs = new PostgresCommerceJobStore(database);
+    try {
+      // Still has attempts left: commerce_reap_expired_jobs() must requeue it, not fail it,
+      // even though this is the exact same lease-expiry state the old cleanup script used to
+      // interpret as a terminal failure.
+      const retryable = await jobs.enqueue({
+        identity: operator,
+        kind: 'create_conversation',
+        requestId: `req_reap_retryable_${suffix}`,
+        model: 'deepseek-v4-flash',
+        message: 'reap retryable job',
+        maxQueuedPerUser: 4,
+        maxAttempts: 3,
+      });
+      await jobs.claim({ workerId: 'worker-reap-a', leaseMs: 30_000 });
+      await pool.query(
+        `UPDATE commerce_agent_jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`,
+        [retryable.id],
+      );
+      const retryableReap = await pool.query(
+        'SELECT dead_lettered_count, requeued_count FROM commerce_reap_expired_jobs()',
+      );
+      expect(retryableReap.rows[0]).toMatchObject({ dead_lettered_count: 0, requeued_count: 1 });
+      expect((await jobs.get(operator, retryable.id)).status).toBe('queued');
+      // Job claiming is a global FIFO across tenants (no tenant filter): clear this job before
+      // claiming the next one so it can't be picked up ahead of the job under test below.
+      await pool.query('DELETE FROM commerce_agent_jobs WHERE id = $1', [retryable.id]);
+
+      // Attempts exhausted: the same function must dead-letter it instead of requeuing.
+      const exhausted = await jobs.enqueue({
+        identity: operator,
+        kind: 'create_conversation',
+        requestId: `req_reap_exhausted_${suffix}`,
+        model: 'deepseek-v4-flash',
+        message: 'reap exhausted job',
+        maxQueuedPerUser: 4,
+        maxAttempts: 1,
+      });
+      await jobs.claim({ workerId: 'worker-reap-b', leaseMs: 30_000 });
+      await pool.query(
+        `UPDATE commerce_agent_jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`,
+        [exhausted.id],
+      );
+      const exhaustedReap = await pool.query(
+        'SELECT dead_lettered_count, requeued_count FROM commerce_reap_expired_jobs()',
+      );
+      expect(exhaustedReap.rows[0]).toMatchObject({ dead_lettered_count: 1, requeued_count: 0 });
+      expect((await jobs.get(operator, exhausted.id)).status).toBe('dead_letter');
+    } finally {
+      await pool.query('DELETE FROM commerce_agent_jobs WHERE tenant_id = $1', [operator.tenantId]);
+    }
+  });
+
   it('serializes concurrent per-user queue limit checks', async () => {
     const suffix = randomUUID();
     const operator = identity(`tenant_job_limit_${suffix}`, `user_job_limit_${suffix}`);
@@ -361,6 +462,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       await store.failTurn({
         identity: operator,
         runId: created.runId,
+        generation: created.generation,
         code: 'NETWORK_ERROR',
         message: 'temporary upstream failure',
       });
@@ -375,6 +477,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       expect(reclaimed).toEqual({
         runId: created.runId,
         conversationId: created.conversation.id,
+        generation: created.generation + 1,
       });
       const state = await pool.query<{
         status: string;
@@ -391,9 +494,22 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       expect(state.rows[0]).toMatchObject({ status: 'running' });
       expect(Number(state.rows[0]?.message_count)).toBe(1);
       expect(Number(state.rows[0]?.run_count)).toBe(1);
+      // A stale writer from the pre-reclaim generation must be fenced off, not accepted.
+      await expect(store.failTurn({
+        identity: operator,
+        runId: created.runId,
+        generation: created.generation,
+        code: 'STALE_ATTEMPT_SHOULD_BE_FENCED',
+        message: 'a superseded attempt must not be able to write after reclaim',
+      })).resolves.toBeUndefined();
+      expect((await pool.query(
+        'SELECT status, error_code FROM commerce_agent_runs WHERE id = $1',
+        [created.runId],
+      )).rows[0]).toMatchObject({ status: 'running', error_code: null });
       await store.failTurn({
         identity: operator,
         runId: created.runId,
+        generation: reclaimed!.generation,
         code: 'EXPECTED_TEST_CLEANUP',
         message: 'integration cleanup',
       });
@@ -401,6 +517,90 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       await cleanupControlTenant(tenantId, [operator]);
     }
   });
+
+  it('reclaims a Run that hard-crashed mid-execution (still running, lease expired) without a NOT_REPLAYABLE dead end', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_run_crash_${suffix}`;
+    const operator = identity(tenantId, `user_run_crash_${suffix}`);
+    const requestId = `req_run_crash_${suffix}`;
+    const requestHash = `sha256:${'e'.repeat(64)}`;
+    try {
+      const created = await store.createConversationAndBeginTurn(claimInput({
+        identity: operator,
+        requestId,
+        runId: `run_crash_${suffix}`,
+        requestHash,
+        globalLimit: 4,
+      }));
+      expect(created.created).toBe(true);
+      if (!created.created) throw new Error('Expected a created integration run.');
+      // Simulate a Worker that hard-crashed mid-turn: the Run row is never marked failed or
+      // completed, it is simply abandoned with status still 'running' past its lease. Before
+      // the fix, retryFailedTurn only matched status='failed' and would return null here,
+      // forcing a fallback path that dead-ended in COMMERCE_REQUEST_NOT_REPLAYABLE.
+      await pool.query(
+        "UPDATE commerce_agent_runs SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
+        [created.runId],
+      );
+      const preReclaim = await pool.query<{ status: string }>(
+        'SELECT status FROM commerce_agent_runs WHERE id = $1',
+        [created.runId],
+      );
+      expect(preReclaim.rows[0]).toMatchObject({ status: 'running' });
+
+      const reclaimed = await store.retryFailedTurn({
+        identity: operator,
+        requestId,
+        requestSha256: requestHash,
+        globalConcurrencyLimit: 4,
+        tenantConcurrencyLimit: 4,
+        leaseMs: 30_000,
+      });
+      expect(reclaimed).toEqual({
+        runId: created.runId,
+        conversationId: created.conversation.id,
+        generation: created.generation + 1,
+      });
+      const postReclaim = await pool.query<{ status: string; lease_expires_at: unknown }>(
+        'SELECT status, lease_expires_at FROM commerce_agent_runs WHERE id = $1',
+        [created.runId],
+      );
+      expect(postReclaim.rows[0]?.status).toBe('running');
+      expect(new Date(postReclaim.rows[0]!.lease_expires_at as string).getTime())
+        .toBeGreaterThan(Date.now());
+
+      // The crashed attempt's generation must now be fenced: it can no longer complete the
+      // turn out from under the attempt that reclaimed it.
+      await expect(store.completeTurn({
+        identity: operator,
+        conversationId: created.conversation.id,
+        runId: created.runId,
+        generation: created.generation,
+        assistantMessageId: `assistant_crashed_${suffix}`,
+        answer: {
+          status: 'needs_clarification',
+          answer: 'stale attempt should not be able to complete',
+          answerClaims: [],
+          findings: [],
+          recommendations: [],
+          followUps: [],
+        },
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        traces: [],
+      })).rejects.toThrow(/not active|did not belong/iu);
+
+      await store.failTurn({
+        identity: operator,
+        runId: created.runId,
+        generation: reclaimed!.generation,
+        code: 'EXPECTED_TEST_CLEANUP',
+        message: 'integration cleanup',
+      });
+    } finally {
+      await cleanupControlTenant(tenantId, [operator]);
+    }
+  });
+
 
   it('serializes global capacity claims across separate users', async () => {
     const suffix = randomUUID();
@@ -470,18 +670,20 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
 
       const runId = created?.runId;
       expect(runId).toBeTruthy();
-      await expect(store.renewRunLease({ identity: operator, runId: runId!, leaseMs: 30_000 }))
+      const generation = created && created.created ? created.generation : 0;
+      await expect(store.renewRunLease({ identity: operator, runId: runId!, generation, leaseMs: 30_000 }))
         .resolves.toBe(true);
       await pool.query(
         "UPDATE commerce_agent_runs SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
         [runId],
       );
-      await expect(store.renewRunLease({ identity: operator, runId: runId!, leaseMs: 30_000 }))
+      await expect(store.renewRunLease({ identity: operator, runId: runId!, generation, leaseMs: 30_000 }))
         .resolves.toBe(false);
       await expect(store.completeTurn({
         identity: operator,
         conversationId: created && 'conversation' in created ? created.conversation.id : '',
         runId: runId!,
+        generation,
         assistantMessageId: `assistant_stale_${suffix}`,
         answer: {
           status: 'needs_clarification',
@@ -506,14 +708,19 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       await withAnalyticsTenant(tenantId, async (client) => {
         await client.query(
           `INSERT INTO commerce_daily_metrics
-             (tenant_id, metric_date, region, channel, sku, category, visits, paid_orders,
+             (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
               units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
               stockout_hours, ending_inventory, source_updated_at)
-           VALUES ($1, '2026-07-27', 'East', 'Search', 'SKU-TEST', 'Apparel',
+           VALUES ($1, 'integration-catalog', '2026-07-27', 'East', 'Search', 'SKU-TEST', 'Apparel',
                    100, 10, 12, 1200, 1, 20, 500, 100, 3, 0, 25, NOW())`,
           [tenantId],
         );
-        await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-catalog',
+          coverageStart: '2026-07-27',
+          coverageEnd: '2026-07-27',
+        });
         const repository = new PostgresCommerceAnalyticsRepository(client);
         await expect(repository.getCatalog(tenantId)).resolves.toMatchObject({
           coverage: {
@@ -547,6 +754,163 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
     }
   });
 
+  it('accepts a zero-business date only after an explicit completeness partition is published', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_zero_day_${suffix}`;
+    try {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query(
+          `INSERT INTO commerce_daily_metrics
+             (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
+              units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
+              stockout_hours, ending_inventory, source_updated_at)
+           VALUES
+             ($1, 'integration-zero-day', '2026-07-01', 'East', 'Search', 'SKU-ZERO', 'Apparel',
+              10, 1, 1, 100, 0, 0, 40, 5, 1, 0, 20, '2026-07-01T12:00:00Z'),
+             ($1, 'integration-zero-day', '2026-07-03', 'East', 'Search', 'SKU-ZERO', 'Apparel',
+              20, 2, 2, 200, 0, 0, 80, 10, 1, 0, 18, '2026-07-03T12:00:00Z')`,
+          [tenantId],
+        );
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-zero-day',
+          coverageStart: '2026-07-01',
+          coverageEnd: '2026-07-03',
+          sourceUpdatedAt: '2026-07-03T12:00:00.000Z',
+        });
+
+        const partitions = await client.query<{
+          partition_date: string;
+          fact_row_count: number;
+          completeness_state: string;
+        }>(
+          `SELECT partition_date::text, fact_row_count::integer, completeness_state
+           FROM commerce_tenant_data_partitions
+           WHERE tenant_id = $1
+           ORDER BY partition_date`,
+          [tenantId],
+        );
+        expect(partitions.rows).toEqual([
+          { partition_date: '2026-07-01', fact_row_count: 1, completeness_state: 'ready' },
+          { partition_date: '2026-07-02', fact_row_count: 0, completeness_state: 'ready' },
+          { partition_date: '2026-07-03', fact_row_count: 1, completeness_state: 'ready' },
+        ]);
+
+        const repository = new PostgresCommerceAnalyticsRepository(client);
+        await expect(repository.compareMetrics(tenantId, {
+          current: { start: '2026-07-01', end: '2026-07-03' },
+          metrics: ['gmv'],
+          filters: { regions: [], channels: [], skus: [], categories: [] },
+        })).resolves.toMatchObject({ current: { gmv: 300 } });
+      });
+    } finally {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_partitions WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
+      }).catch(() => undefined);
+    }
+  });
+
+  it('rejects analytics when a required date partition is missing', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_missing_day_${suffix}`;
+    try {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query(
+          `INSERT INTO commerce_daily_metrics
+             (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
+              units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
+              stockout_hours, ending_inventory, source_updated_at)
+           VALUES
+             ($1, 'integration-missing-day', '2026-07-01', 'East', 'Search', 'SKU-GAP', 'Apparel',
+              10, 1, 1, 100, 0, 0, 40, 5, 1, 0, 20, '2026-07-01T12:00:00Z'),
+             ($1, 'integration-missing-day', '2026-07-03', 'East', 'Search', 'SKU-GAP', 'Apparel',
+              20, 2, 2, 200, 0, 0, 80, 10, 1, 0, 18, '2026-07-03T12:00:00Z')`,
+          [tenantId],
+        );
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-missing-day',
+          coverageStart: '2026-07-01',
+          coverageEnd: '2026-07-03',
+          sourceUpdatedAt: '2026-07-03T12:00:00.000Z',
+        });
+        await client.query(
+          `DELETE FROM commerce_tenant_data_partitions
+           WHERE tenant_id = $1 AND partition_date = '2026-07-02'`,
+          [tenantId],
+        );
+
+        const repository = new PostgresCommerceAnalyticsRepository(client);
+        await expect(repository.compareMetrics(tenantId, {
+          current: { start: '2026-07-01', end: '2026-07-03' },
+          metrics: ['gmv'],
+          filters: { regions: [], channels: [], skus: [], categories: [] },
+        })).rejects.toMatchObject({ code: 'COMMERCE_DATA_RANGE_INCOMPLETE' });
+      });
+    } finally {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_partitions WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
+      }).catch(() => undefined);
+    }
+  });
+
+  it('aggregates inventory sub-buckets per SKU-day before taking the cross-day minimum', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_inventory_daily_${suffix}`;
+    try {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query(
+          `INSERT INTO commerce_daily_metrics
+             (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
+              units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
+              stockout_hours, ending_inventory, source_updated_at)
+           VALUES
+             ($1, 'integration-inventory', '2026-07-01', 'East', 'Search', 'SKU-RISK', 'Apparel',
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 5, '2026-07-01T11:00:00Z'),
+             ($1, 'integration-inventory', '2026-07-01', 'West', 'Organic', 'SKU-RISK', 'Apparel',
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7, '2026-07-01T12:00:00Z'),
+             ($1, 'integration-inventory', '2026-07-02', 'East', 'Search', 'SKU-RISK', 'Apparel',
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 8, '2026-07-02T11:00:00Z'),
+             ($1, 'integration-inventory', '2026-07-02', 'West', 'Organic', 'SKU-RISK', 'Apparel',
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, '2026-07-02T12:00:00Z')`,
+          [tenantId],
+        );
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-inventory',
+          coverageStart: '2026-07-01',
+          coverageEnd: '2026-07-02',
+          sourceUpdatedAt: '2026-07-02T12:00:00.000Z',
+        });
+
+        const repository = new PostgresCommerceAnalyticsRepository(client);
+        await expect(repository.inventoryRisk(tenantId, {
+          range: { start: '2026-07-01', end: '2026-07-02' },
+          filters: { regions: [], channels: [], skus: [], categories: [] },
+          limit: 10,
+        })).resolves.toMatchObject([{
+          sku: 'SKU-RISK',
+          category: 'Apparel',
+          stockoutHours: 10,
+          minimumEndingInventory: 12,
+        }]);
+      });
+    } finally {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_partitions WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
+      }).catch(() => undefined);
+    }
+  });
+
   it('ingests a mocked Shopify page through PostgreSQL and publishes only supported metrics', async () => {
     const suffix = randomUUID();
     const tenantId = `tenant_shopify_${suffix}`;
@@ -566,11 +930,18 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
           tenantId,
           maxRows: 100,
           maxBytes: 1_000_000,
+          coverage: {
+            start: '2026-07-01',
+            end: '2026-08-01',
+            complete: true,
+            proof: 'full_history_reconciliation',
+          },
           source: {
             type: 'shopify',
             apiVersion: '2026-07',
-            initialUpdatedAt: '2026-07-01T00:00:00.000Z',
+            initialUpdatedAt: '2026-06-30T16:00:00.000Z',
             businessTimeZone: 'Asia/Shanghai',
+            fullHistoryReconciliation: true,
             pageSize: 50,
             maxPages: 2,
             timeoutMs: 5_000,
@@ -583,7 +954,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
           checkpoint: string | null,
           limits: { maxRows: number; maxBytes: number; timeoutMs: number },
         ) => loadShopifySource(config.source, checkpoint, limits, {
-          now: () => new Date('2026-08-01T12:00:00.000Z'),
+          now: () => new Date('2026-08-02T00:00:00.000Z'),
           fetchImpl: async () => new Response(JSON.stringify({
             data: {
               orders: {
@@ -626,7 +997,7 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         tenantId,
         status: 'completed',
         sourceRows: 1,
-        importedRows: 1,
+        importedRows: 2,
       });
 
       await withAnalyticsTenant(tenantId, async (client) => {
@@ -644,8 +1015,8 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         expect(audit.rows[0]).toMatchObject({
           transport: 'shopify',
           status: 'completed',
-          checkpoint_after: '2026-08-01T12:00:00.000Z',
-          imported_rows: 1,
+          checkpoint_after: '2026-08-02T00:00:00.000Z',
+          imported_rows: 2,
         });
 
         const repository = new PostgresCommerceAnalyticsRepository(client);
@@ -683,6 +1054,272 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       if (previousToken === undefined) delete process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
       else process.env.SHOPIFY_ADMIN_ACCESS_TOKEN = previousToken;
       await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_connector_source_facts WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_connector_runs WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_connector_checkpoints WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
+      }).catch(() => undefined);
+    }
+  });
+
+  it('recomputes only the touched Shopify bucket from full order history instead of overwriting it with a partial window', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_shopify_partial_${suffix}`;
+    const previousDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+    const previousToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+    process.env.SHOPIFY_SHOP_DOMAIN = 'integration-store.myshopify.com';
+    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN = 'integration-token-never-log';
+    const baseConfig = {
+      schemaVersion: 1 as const,
+      connectorId: 'shopify-orders-partial',
+      connectorVersion: '1.0.0',
+      tenantId,
+      maxRows: 100,
+      maxBytes: 1_000_000,
+      coverage: {
+        start: '2026-07-01',
+        end: '2026-08-01',
+        complete: true,
+        proof: 'full_history_reconciliation',
+      },
+      source: {
+        type: 'shopify' as const,
+        apiVersion: '2026-07',
+        initialUpdatedAt: '2026-06-30T16:00:00.000Z',
+        businessTimeZone: 'Asia/Shanghai',
+        fullHistoryReconciliation: true,
+        pageSize: 50,
+        maxPages: 2,
+        timeoutMs: 5_000,
+        maxRetries: 0,
+      },
+    };
+    const orderNode = (
+      id: string,
+      createdAt: string,
+      updatedAt: string,
+      amount: string,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id,
+      createdAt,
+      updatedAt,
+      test: false,
+      displayFinancialStatus: 'PAID',
+      shippingAddress: { provinceCode: 'ZJ', countryCodeV2: 'CN' },
+      channelInformation: { channelDefinition: { channelName: 'Online Store' } },
+      lineItems: {
+        pageInfo: { hasNextPage: false },
+        nodes: [{ quantity: 1, discountedTotalSet: { shopMoney: { amount, currencyCode: 'CNY' } } }],
+      },
+      refunds: [] as unknown[],
+      ...overrides,
+    });
+    const incrementalConfig = {
+      ...baseConfig,
+      coverage: undefined,
+      source: { ...baseConfig.source, fullHistoryReconciliation: false },
+    };
+    const runWindow = async (
+      watermark: string,
+      nodes: Array<Record<string, unknown>>,
+      expectedCheckpoint: string,
+    ) => runCommerceConnector({
+      database: pool,
+      log: () => undefined,
+      config: incrementalConfig,
+      loadSource: (
+        config: { source: Record<string, unknown> },
+        _configDirectory: string,
+        checkpoint: string | null,
+        limits: { maxRows: number; maxBytes: number; timeoutMs: number },
+      ) => {
+        expect(checkpoint).toBe(expectedCheckpoint);
+        return loadShopifySource(config.source, checkpoint, limits, {
+          now: () => new Date(watermark),
+          fetchImpl: async () => new Response(JSON.stringify({
+            data: {
+              orders: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes,
+              },
+            },
+          }), { status: 200 }),
+        });
+      },
+    });
+    try {
+      // Run 1: two orders land in the same (date, region, channel, sku) bucket.
+      await runCommerceConnector({
+        database: pool,
+        log: () => undefined,
+        config: baseConfig,
+        loadSource: (
+          config: { source: Record<string, unknown> },
+          _configDirectory: string,
+          checkpoint: string | null,
+          limits: { maxRows: number; maxBytes: number; timeoutMs: number },
+        ) => loadShopifySource(config.source, checkpoint, limits, {
+          now: () => new Date('2026-08-02T00:00:00.000Z'),
+          fetchImpl: async () => new Response(JSON.stringify({
+            data: {
+              orders: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  orderNode(
+                    'gid://shopify/Order/A',
+                    '2026-08-01T01:00:00.000Z',
+                    '2026-08-01T01:00:00.000Z',
+                    '100.00',
+                  ),
+                  orderNode(
+                    'gid://shopify/Order/B',
+                    '2026-08-01T02:00:00.000Z',
+                    '2026-08-01T02:00:00.000Z',
+                    '50.00',
+                  ),
+                ],
+              },
+            },
+          }), { status: 200 }),
+        }),
+      });
+
+      await withAnalyticsTenant(tenantId, async (client) => {
+        const repository = new PostgresCommerceAnalyticsRepository(client);
+        await expect(repository.compareMetrics(tenantId, {
+          current: { start: '2026-08-01', end: '2026-08-01' },
+          metrics: ['gmv', 'paid_orders'],
+          filters: { regions: [], channels: [], skus: [], categories: [] },
+        })).resolves.toMatchObject({ current: { gmv: 150, paid_orders: 2 } });
+      });
+
+      // Run 2 only observes order B in its updated_at window (e.g. order A was untouched).
+      // The pre-fix implementation aggregated just this window and overwrote the whole
+      // bucket with it, silently dropping order A's history from the daily total.
+      await runCommerceConnector({
+        database: pool,
+        log: () => undefined,
+        config: incrementalConfig,
+        loadSource: (
+          config: { source: Record<string, unknown> },
+          _configDirectory: string,
+          checkpoint: string | null,
+          limits: { maxRows: number; maxBytes: number; timeoutMs: number },
+        ) => {
+          expect(checkpoint).toBe('2026-08-02T00:00:00.000Z');
+          return loadShopifySource(config.source, checkpoint, limits, {
+            now: () => new Date('2026-08-02T06:00:00.000Z'),
+            fetchImpl: async () => new Response(JSON.stringify({
+              data: {
+                orders: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    orderNode(
+                      'gid://shopify/Order/B',
+                      '2026-08-01T02:00:00.000Z',
+                      '2026-08-01T09:00:00.000Z',
+                      '50.00',
+                    ),
+                  ],
+                },
+              },
+            }), { status: 200 }),
+          });
+        },
+      });
+
+      await withAnalyticsTenant(tenantId, async (client) => {
+        const repository = new PostgresCommerceAnalyticsRepository(client);
+        await expect(repository.compareMetrics(tenantId, {
+          current: { start: '2026-08-01', end: '2026-08-01' },
+          metrics: ['gmv', 'paid_orders'],
+          filters: { regions: [], channels: [], skus: [], categories: [] },
+        })).resolves.toMatchObject({ current: { gmv: 150, paid_orders: 2 } });
+      });
+
+      // Run 3 moves order B from ZJ to SH. Both the old and new buckets must be recomputed;
+      // otherwise the old ZJ contribution survives and the order is double counted.
+      await runWindow(
+        '2026-08-02T12:00:00.000Z',
+        [orderNode(
+          'gid://shopify/Order/B',
+          '2026-08-01T02:00:00.000Z',
+          '2026-08-01T15:00:00.000Z',
+          '75.00',
+          { shippingAddress: { provinceCode: 'SH', countryCodeV2: 'CN' } },
+        )],
+        '2026-08-02T06:00:00.000Z',
+      );
+      await withAnalyticsTenant(tenantId, async (client) => {
+        const facts = await client.query<{ region: string; gmv: string; paid_orders: string }>(
+          `SELECT region, gmv::text, paid_orders::text
+           FROM commerce_daily_metrics WHERE tenant_id = $1 ORDER BY region`,
+          [tenantId],
+        );
+        expect(facts.rows).toEqual([
+          { region: 'SH', gmv: '75.00', paid_orders: '1' },
+          { region: 'ZJ', gmv: '100.00', paid_orders: '1' },
+        ]);
+      });
+
+      // Run 4 observes the same order after PAID -> VOIDED. Its entity reconciliation has
+      // zero active lines, so the SH source fact and now-empty SH daily bucket both disappear.
+      await runWindow(
+        '2026-08-02T18:00:00.000Z',
+        [orderNode(
+          'gid://shopify/Order/B',
+          '2026-08-01T02:00:00.000Z',
+          '2026-08-01T19:00:00.000Z',
+          '75.00',
+          {
+            displayFinancialStatus: 'VOIDED',
+            shippingAddress: { provinceCode: 'SH', countryCodeV2: 'CN' },
+          },
+        )],
+        '2026-08-02T12:00:00.000Z',
+      );
+      const assertVoidedState = async () => withAnalyticsTenant(tenantId, async (client) => {
+        const facts = await client.query<{ region: string; gmv: string; paid_orders: string }>(
+          `SELECT region, gmv::text, paid_orders::text
+           FROM commerce_daily_metrics WHERE tenant_id = $1 ORDER BY region`,
+          [tenantId],
+        );
+        expect(facts.rows).toEqual([{ region: 'ZJ', gmv: '100.00', paid_orders: '1' }]);
+        const staged = await client.query<{ count: string }>(
+          'SELECT COUNT(*)::text AS count FROM commerce_connector_source_facts WHERE tenant_id = $1',
+          [tenantId],
+        );
+        expect(staged.rows[0]?.count).toBe('1');
+      });
+      await assertVoidedState();
+
+      // Run 5 repeats the same tombstone state at a later watermark. Reconciliation remains
+      // idempotent and cannot recreate either the line or its deleted aggregate bucket.
+      await runWindow(
+        '2026-08-02T22:00:00.000Z',
+        [orderNode(
+          'gid://shopify/Order/B',
+          '2026-08-01T02:00:00.000Z',
+          '2026-08-01T21:00:00.000Z',
+          '75.00',
+          {
+            displayFinancialStatus: 'VOIDED',
+            shippingAddress: { provinceCode: 'SH', countryCodeV2: 'CN' },
+          },
+        )],
+        '2026-08-02T18:00:00.000Z',
+      );
+      await assertVoidedState();
+    } finally {
+      if (previousDomain === undefined) delete process.env.SHOPIFY_SHOP_DOMAIN;
+      else process.env.SHOPIFY_SHOP_DOMAIN = previousDomain;
+      if (previousToken === undefined) delete process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+      else process.env.SHOPIFY_ADMIN_ACCESS_TOKEN = previousToken;
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_connector_source_facts WHERE tenant_id = $1', [tenantId]);
         await client.query('DELETE FROM commerce_connector_runs WHERE tenant_id = $1', [tenantId]);
         await client.query('DELETE FROM commerce_connector_checkpoints WHERE tenant_id = $1', [tenantId]);
         await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
@@ -696,11 +1333,11 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
     const suffix = randomUUID();
     const tenantId = `tenant_timezone_${suffix}`;
     const insert = `INSERT INTO commerce_daily_metrics
-       (tenant_id, metric_date, region, channel, sku, category, business_timezone,
+       (tenant_id, source_id, metric_date, region, channel, sku, category, business_timezone,
         visits, paid_orders, units, gmv, refund_orders, refund_amount, cost_amount,
         ad_spend, new_customers, stockout_hours, ending_inventory, available_metrics,
         source_updated_at)
-     VALUES ($1, $2, 'SP', 'Olist Marketplace', $3, 'All Products', $4,
+     VALUES ($1, 'integration-timezone', $2, 'SP', 'Olist Marketplace', $3, 'All Products', $4,
              0, 1, 2, 120, 0, 0, 0, 0, 1, 0, 0,
              ARRAY['gmv', 'new_customers', 'paid_orders', 'units']::text[], NOW())`;
     try {
@@ -711,7 +1348,12 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
           'OLIST-ORDER',
           'America/Sao_Paulo',
         ]);
-        await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-timezone',
+          coverageStart: '2018-09-01',
+          coverageEnd: '2018-09-01',
+        });
         const catalog = await new PostgresCommerceAnalyticsRepository(client).getCatalog(tenantId);
         expect(catalog.timezone).toBe('America/Sao_Paulo');
         expect(catalog.metrics.map((metric) => metric.id)).toEqual([
@@ -725,7 +1367,12 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
 
       await expect(withAnalyticsTenant(tenantId, async (client) => {
         await client.query(insert, [tenantId, '2018-09-02', 'OTHER-ORDER', 'Asia/Shanghai']);
-        await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-currency',
+          coverageStart: '2018-09-01',
+          coverageEnd: '2018-09-01',
+        });
       })).rejects.toMatchObject({ code: '23514' });
     } finally {
       await withAnalyticsTenant(tenantId, async (client) => {
@@ -736,13 +1383,107 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
     }
   });
 
+  it('publishes the tenant currency code and rejects mixed-currency facts', async () => {
+    const suffix = randomUUID();
+    const tenantId = `tenant_currency_${suffix}`;
+    const insert = `INSERT INTO commerce_daily_metrics
+       (tenant_id, source_id, metric_date, region, channel, sku, category, currency_code,
+        visits, paid_orders, units, gmv, refund_orders, refund_amount, cost_amount,
+        ad_spend, new_customers, stockout_hours, ending_inventory, available_metrics,
+        source_updated_at)
+     VALUES ($1, 'integration-currency', $2, 'SP', 'Olist Marketplace', $3, 'All Products', $4,
+             0, 1, 2, 120, 0, 0, 0, 0, 1, 0, 0,
+             ARRAY['gmv', 'new_customers', 'paid_orders', 'units']::text[], NOW())`;
+    try {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query(insert, [tenantId, '2018-09-01', 'OLIST-ORDER', 'BRL']);
+        await publishFixtureCoverage(client, {
+          tenantId,
+          connectorId: 'integration-currency',
+          coverageStart: '2018-09-01',
+          coverageEnd: '2018-09-01',
+        });
+        const catalog = await new PostgresCommerceAnalyticsRepository(client).getCatalog(tenantId);
+        expect(catalog.currencyCode).toBe('BRL');
+      });
+
+      await expect(withAnalyticsTenant(tenantId, async (client) => {
+        await client.query(insert, [tenantId, '2018-09-02', 'OTHER-ORDER', 'USD']);
+        await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+      })).rejects.toMatchObject({ code: '23514' });
+    } finally {
+      await withAnalyticsTenant(tenantId, async (client) => {
+        await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_partitions WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_connector_date_coverage WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_connector_checkpoints WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);
+      }).catch(() => undefined);
+    }
+  });
+
+  it('applies the production analytics grants with source-fact backup coverage', async () => {
+    const roleNames = [
+      'commerce_readonly_user',
+      'commerce_ingest_user',
+      'commerce_backup_user',
+    ];
+    const password = `GrantTest_${randomUUID().replaceAll('-', '')}_9X`;
+    const roleUrl = (role: string) => {
+      const parsed = new URL(connectionString);
+      parsed.username = role;
+      parsed.password = password;
+      return parsed.toString();
+    };
+    let backupPool: Pool | null = null;
+    try {
+      for (const role of roleNames.reverse()) {
+        await pool.query(`DROP OWNED BY ${role}`).catch(() => undefined);
+        await pool.query(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
+      }
+      for (const role of roleNames.reverse()) {
+        await pool.query(
+          `CREATE ROLE ${role} LOGIN PASSWORD '${password}'
+             NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`,
+        );
+      }
+      const grants = fs.readFileSync(
+        path.join(root, 'deploy', 'postgres', 'commerce-analytics-grants.sql'),
+        'utf8',
+      );
+      await pool.query(grants);
+      backupPool = new Pool({
+        connectionString: roleUrl('commerce_backup_user'),
+        max: 1,
+        connectionTimeoutMillis: 10_000,
+        statement_timeout: 30_000,
+        application_name: 'commerce-grants-backup-test',
+      });
+      await expect(backupPool.query(
+        'SELECT COUNT(*)::integer AS count FROM commerce_connector_source_facts',
+      )).resolves.toMatchObject({ rows: [{ count: expect.any(Number) }] });
+      await expect(backupPool.query(
+        "SELECT has_table_privilege(current_user, 'public.commerce_connector_source_facts', 'SELECT') AS ok",
+      )).resolves.toMatchObject({ rows: [{ ok: true }] });
+    } finally {
+      await backupPool?.end().catch(() => undefined);
+      for (const role of roleNames) {
+        await pool.query(`DROP OWNED BY ${role}`).catch(() => undefined);
+        await pool.query(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
+      }
+    }
+  });
+
   it('enforces split runtime roles, read-only analytics and cross-tenant RLS', async () => {
     const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
     const roles = {
       analytics: `commerce_test_analytics_${suffix}`,
       control: `commerce_test_control_${suffix}`,
       ingest: `commerce_test_ingest_${suffix}`,
-      maintenance: `commerce_test_maintenance_${suffix}`,
+      // The maintenance RLS policy is deliberately bound to the production login name;
+      // a caller-controlled GUC alone must never activate retention access.
+      maintenance: 'commerce_maintenance_user',
     };
     const password = `TestRole_${suffix}_9X`;
     const rolePools: Pool[] = [];
@@ -756,12 +1497,16 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       return parsed.toString();
     };
     const insertFact = `INSERT INTO commerce_daily_metrics
-       (tenant_id, metric_date, region, channel, sku, category, visits, paid_orders,
+       (tenant_id, source_id, metric_date, region, channel, sku, category, visits, paid_orders,
         units, gmv, refund_orders, refund_amount, cost_amount, ad_spend, new_customers,
         stockout_hours, ending_inventory, source_updated_at)
-     VALUES ($1, '2026-07-27', 'East', 'Search', $2, 'Apparel',
+     VALUES ($1, 'integration-role', '2026-07-27', 'East', 'Search', $2, 'Apparel',
              100, 10, 12, 1200, 1, 20, 500, 100, 3, 0, 25, NOW())`;
     try {
+      // The integration database is explicitly disposable. Remove a role left behind by
+      // an interrupted prior run before recreating the production-named maintenance login.
+      await pool.query(`DROP OWNED BY ${roles.maintenance}`).catch(() => undefined);
+      await pool.query(`DROP ROLE IF EXISTS ${roles.maintenance}`).catch(() => undefined);
       for (const role of Object.values(roles)) {
         await pool.query(
           `CREATE ROLE ${role} LOGIN PASSWORD '${password}'
@@ -770,18 +1515,21 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       }
       await pool.query(`GRANT USAGE ON SCHEMA public TO ${roles.analytics}, ${roles.ingest}`);
       await pool.query(
-        `GRANT SELECT ON commerce_daily_metrics, commerce_tenant_data_status,
-           commerce_entity_catalog TO ${roles.analytics}`,
+         `GRANT SELECT ON commerce_daily_metrics, commerce_tenant_data_status,
+            commerce_tenant_data_partitions, commerce_entity_catalog TO ${roles.analytics}`,
       );
       await pool.query(
         `ALTER ROLE ${roles.analytics} SET default_transaction_read_only = on`,
       );
       await pool.query(
-        `GRANT SELECT, INSERT, UPDATE ON commerce_daily_metrics TO ${roles.ingest}`,
+        `GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_daily_metrics TO ${roles.ingest}`,
       );
       await pool.query(
-        `GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_tenant_data_status,
-           commerce_entity_catalog, commerce_connector_checkpoints,
+        `GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_connector_source_facts TO ${roles.ingest}`,
+      );
+      await pool.query(
+         `GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_tenant_data_status,
+            commerce_tenant_data_partitions, commerce_entity_catalog, commerce_connector_checkpoints,
            commerce_connector_runs TO ${roles.ingest}`,
       );
       await pool.query(
@@ -812,7 +1560,12 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
       for (const tenantId of [tenantA, tenantB]) {
         await withAnalyticsTenant(tenantId, async (client) => {
           await client.query(insertFact, [tenantId, `SKU-${tenantId}`]);
-          await client.query('SELECT commerce_refresh_tenant_catalog($1)', [tenantId]);
+          await publishFixtureCoverage(client, {
+            tenantId,
+            connectorId: 'integration-role-fixture',
+            coverageStart: '2026-07-27',
+            coverageEnd: '2026-07-27',
+          });
         });
       }
       await pool.query(
@@ -880,6 +1633,16 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         );
         await ingestClient.query(insertFact, [tenantA, 'SKU-INGEST-ALLOWED']);
         await ingestClient.query(
+          `INSERT INTO commerce_connector_source_facts
+             (tenant_id, connector_id, source_entity_id, source_line_id, metric_date,
+              region, channel, sku, category, business_timezone, currency_code,
+              paid_orders, units, gmv, refund_amount, source_updated_at)
+           VALUES ($1, 'integration', 'order-role-1', 'order:role-1', '2026-07-27',
+                   'East', 'Search', 'SHOPIFY-ORDER', 'All Products', 'Asia/Shanghai',
+                   'CNY', 1, 1, 10, 0, NOW())`,
+          [tenantA],
+        );
+        await ingestClient.query(
           `INSERT INTO commerce_connector_runs
              (id, tenant_id, connector_id, connector_version, transport, status, completed_at)
            VALUES ($1, $2, 'integration', '1.0.0', 'file', 'completed', NOW())`,
@@ -892,32 +1655,52 @@ describe.sequential('Commerce PostgreSQL integration gate', () => {
         ingestClient.release();
       }
 
-      await expect(controlPool.query(
-        'DELETE FROM commerce_agent_conversations WHERE id = $1',
-        [conversationId],
-      )).rejects.toMatchObject({ code: '42501' });
-      await expect(controlPool.query(
-        `INSERT INTO commerce_agent_workers (id, revision, status)
-         VALUES ($1, 'integration', 'running')`,
-        [`worker_role_${suffix}`],
-      )).resolves.toMatchObject({ rowCount: 1 });
-      await expect(maintenancePool.query(
-        `INSERT INTO commerce_agent_conversations (id, tenant_id, user_id, title, model)
-         VALUES ('conv_maintenance_denied', $1, 'role-user', 'Denied', 'deepseek-v4-flash')`,
-        [tenantA],
-      )).rejects.toMatchObject({ code: '42501' });
-      await expect(maintenancePool.query(
-        'DELETE FROM commerce_agent_conversations WHERE id = $1',
-        [conversationId],
-      )).resolves.toMatchObject({ rowCount: 1 });
-      await expect(maintenancePool.query(
-        'DELETE FROM commerce_agent_workers WHERE id = $1',
-        [`worker_role_${suffix}`],
-      )).resolves.toMatchObject({ rowCount: 1 });
+      const controlClient = await controlPool.connect();
+      try {
+        await controlClient.query("SELECT set_config('commerce.control_system', 'on', false)");
+        await expect(controlClient.query(
+          'DELETE FROM commerce_agent_conversations WHERE id = $1',
+          [conversationId],
+        )).rejects.toMatchObject({ code: '42501' });
+        await expect(controlClient.query(
+          `INSERT INTO commerce_agent_workers (id, revision, status)
+           VALUES ($1, 'integration', 'running')`,
+          [`worker_role_${suffix}`],
+        )).resolves.toMatchObject({ rowCount: 1 });
+      } finally {
+        controlClient.release();
+      }
+      const maintenanceClient = await maintenancePool.connect();
+      try {
+        await maintenanceClient.query("SELECT set_config('commerce.control_system', 'on', false)");
+        await expect(maintenanceClient.query(
+          `INSERT INTO commerce_agent_conversations (id, tenant_id, user_id, title, model)
+           VALUES ('conv_maintenance_denied', $1, 'role-user', 'Denied', 'deepseek-v4-flash')`,
+          [tenantA],
+        )).rejects.toMatchObject({ code: '42501' });
+        await expect(maintenanceClient.query(
+          'DELETE FROM commerce_agent_conversations WHERE id = $1',
+          [conversationId],
+        )).resolves.toMatchObject({ rowCount: 0 });
+        await maintenanceClient.query(
+          "SELECT set_config('commerce.control_maintenance', 'on', false)",
+        );
+        await expect(maintenanceClient.query(
+          'DELETE FROM commerce_agent_conversations WHERE id = $1',
+          [conversationId],
+        )).resolves.toMatchObject({ rowCount: 1 });
+        await expect(maintenanceClient.query(
+          'DELETE FROM commerce_agent_workers WHERE id = $1',
+          [`worker_role_${suffix}`],
+        )).resolves.toMatchObject({ rowCount: 1 });
+      } finally {
+        maintenanceClient.release();
+      }
     } finally {
       await Promise.all(rolePools.map((rolePool) => rolePool.end().catch(() => undefined)));
       for (const tenantId of [tenantA, tenantB]) {
         await withAnalyticsTenant(tenantId, async (client) => {
+          await client.query('DELETE FROM commerce_connector_source_facts WHERE tenant_id = $1', [tenantId]);
           await client.query('DELETE FROM commerce_entity_catalog WHERE tenant_id = $1', [tenantId]);
           await client.query('DELETE FROM commerce_tenant_data_status WHERE tenant_id = $1', [tenantId]);
           await client.query('DELETE FROM commerce_daily_metrics WHERE tenant_id = $1', [tenantId]);

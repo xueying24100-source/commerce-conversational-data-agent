@@ -86,44 +86,54 @@ async function collectConnectorMetrics(tenantId: string) {
   });
 }
 
+interface CommerceControlMetricsSnapshot {
+  jobs: Array<{ status: string; count: unknown }>;
+  runs: Array<{
+    status: string;
+    count: unknown;
+    duration_sum: unknown;
+    duration_count: unknown;
+  }>;
+  totals: {
+    input_tokens: unknown;
+    output_tokens: unknown;
+    total_tokens: unknown;
+    evidence_count: unknown;
+  };
+  workers: { active: unknown };
+  queue: { depth: unknown; oldest_seconds: unknown };
+  tool_calls: Array<{ operation: string; count: unknown }>;
+  model_budget: { reserved_usd: unknown; spent_usd: unknown };
+  notifications: Array<{ status: string; count: unknown }>;
+  review_schedules: Array<{ status: string; count: unknown }>;
+  weekly_diagnoses: Array<{ status: string; count: unknown }>;
+}
+
 export async function collectCommercePrometheusMetrics(tenantId: string | null = null): Promise<string> {
   const database = getCommerceControlDatabase();
   const config = getCommerceAgentRuntimeConfig();
-  const [jobs, runs, totals, workers, queue] = await Promise.all([
-    database.query<{ status: string; count: unknown }>(
-      `SELECT status, COUNT(*)::bigint AS count FROM commerce_agent_jobs GROUP BY status`,
-    ),
-    database.query<{ status: string; count: unknown; duration_sum: unknown; duration_count: unknown }>(
-      `SELECT status, COUNT(*)::bigint AS count,
-              COALESCE(SUM(EXTRACT(EPOCH FROM (completed_at - started_at)))
-                FILTER (WHERE completed_at IS NOT NULL), 0) AS duration_sum,
-              COUNT(completed_at)::bigint AS duration_count
-       FROM commerce_agent_runs GROUP BY status`,
-    ),
-    database.query<{
-      input_tokens: unknown;
-      output_tokens: unknown;
-      total_tokens: unknown;
-      evidence_count: unknown;
-    }>(
-      `SELECT
-         COALESCE((SELECT SUM(input_tokens) FROM commerce_agent_runs), 0) AS input_tokens,
-         COALESCE((SELECT SUM(output_tokens) FROM commerce_agent_runs), 0) AS output_tokens,
-         COALESCE((SELECT SUM(total_tokens) FROM commerce_agent_runs), 0) AS total_tokens,
-         (SELECT COUNT(*) FROM commerce_agent_evidence) AS evidence_count`,
-    ),
-    database.query<{ active: unknown }>(
-      `SELECT COUNT(*)::bigint AS active FROM commerce_agent_workers
-       WHERE status = 'running'
-         AND heartbeat_at >= NOW() - ($1::integer * INTERVAL '1 millisecond')`,
-      [config.workerStaleMs],
-    ),
-    database.query<{ depth: unknown; oldest_seconds: unknown }>(
-      `SELECT COUNT(*)::bigint AS depth,
-              COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at))), 0) AS oldest_seconds
-       FROM commerce_agent_jobs WHERE status = 'queued'`,
-    ),
-  ]);
+  const result = await database.query<{ snapshot: CommerceControlMetricsSnapshot }>(
+    'SELECT public.commerce_collect_control_metrics($1::integer) AS snapshot',
+    [config.workerStaleMs],
+  );
+  const snapshot = result.rows[0]?.snapshot;
+  if (!snapshot) throw new Error('Commerce control metrics snapshot is unavailable.');
+  const jobs = { rows: snapshot.jobs ?? [] };
+  const runs = { rows: snapshot.runs ?? [] };
+  const totals = { rows: [snapshot.totals] };
+  const workers = { rows: [snapshot.workers] };
+  const queue = { rows: [snapshot.queue] };
+  const toolCalls = { rows: snapshot.tool_calls ?? [] };
+  const modelBudget = { rows: [snapshot.model_budget] };
+  const notifications = { rows: snapshot.notifications ?? [] };
+  const reviewSchedules = { rows: snapshot.review_schedules ?? [] };
+  const weeklyDiagnoses = { rows: snapshot.weekly_diagnoses ?? [] };
+  const completedRuns = runs.rows
+    .filter((row) => row.status === 'completed')
+    .reduce((sum, row) => sum + numberValue(row.count), 0);
+  const terminalRuns = runs.rows
+    .filter((row) => ['completed', 'failed'].includes(row.status))
+    .reduce((sum, row) => sum + numberValue(row.count), 0);
   const lines = [
     '# HELP commerce_agent_jobs Current durable jobs by status.',
     '# TYPE commerce_agent_jobs gauge',
@@ -152,6 +162,34 @@ export async function collectCommercePrometheusMetrics(tenantId: string | null =
     '# HELP commerce_agent_queue_oldest_seconds Age of the oldest queued job.',
     '# TYPE commerce_agent_queue_oldest_seconds gauge',
     metric('commerce_agent_queue_oldest_seconds', numberValue(queue.rows[0]?.oldest_seconds)),
+    '# HELP commerce_agent_success_ratio Completed retained runs divided by terminal retained runs.',
+    '# TYPE commerce_agent_success_ratio gauge',
+    metric('commerce_agent_success_ratio', terminalRuns ? completedRuns / terminalRuns : 1),
+    '# HELP commerce_agent_tool_calls Retained successful evidence-producing tool calls.',
+    '# TYPE commerce_agent_tool_calls counter',
+    ...toolCalls.rows.map((row) => metric('commerce_agent_tool_calls', numberValue(row.count), {
+      operation: row.operation,
+    })),
+    '# HELP commerce_agent_model_budget_usd Current UTC-day model budget accounting.',
+    '# TYPE commerce_agent_model_budget_usd gauge',
+    metric('commerce_agent_model_budget_usd', numberValue(modelBudget.rows[0]?.reserved_usd), { kind: 'reserved' }),
+    metric('commerce_agent_model_budget_usd', numberValue(modelBudget.rows[0]?.spent_usd), { kind: 'spent' }),
+    metric('commerce_agent_model_budget_usd', numberValue(config.dailyModelBudgetUsd), { kind: 'limit' }),
+    '# HELP commerce_feishu_notifications Logical Feishu outbox commands by deterministic delivery state.',
+    '# TYPE commerce_feishu_notifications gauge',
+    ...notifications.rows.map((row) => metric('commerce_feishu_notifications', numberValue(row.count), {
+      status: row.status,
+    })),
+    '# HELP commerce_action_review_backlog Action review schedules by state.',
+    '# TYPE commerce_action_review_backlog gauge',
+    ...reviewSchedules.rows.map((row) => metric('commerce_action_review_backlog', numberValue(row.count), {
+      status: row.status,
+    })),
+    '# HELP commerce_weekly_diagnosis_runs Canonical weekly diagnosis runs by state.',
+    '# TYPE commerce_weekly_diagnosis_runs gauge',
+    ...weeklyDiagnoses.rows.map((row) => metric('commerce_weekly_diagnosis_runs', numberValue(row.count), {
+      status: row.status,
+    })),
   ];
   if (tenantId) {
     const connectorMetrics = await collectConnectorMetrics(tenantId);

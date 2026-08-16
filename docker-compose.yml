@@ -17,10 +17,15 @@ services:
   web:
     <<: *commerce-service
     command: ["node", "scripts/runtime/start-commerce.js"]
+    environment:
+      COMMERCE_RUNTIME_ROLE: web
+      # Do not expose the Worker credential to the Web process even when a shared
+      # local env file is used to feed Compose.
+      COMMERCE_CONTROL_WORKER_DATABASE_URL: ""
     ports:
       - "127.0.0.1:${COMMERCE_PORT:-3000}:3000"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -29,3 +34,10 @@ services:
   worker:
     <<: *commerce-service
     command: ["node", "scripts/runtime/commerce-worker.js"]
+    environment:
+      COMMERCE_RUNTIME_ROLE: worker
+      COMMERCE_CONTROL_API_DATABASE_URL: ""
+    # Worker health is its revisioned database heartbeat, consumed by Web readiness.
+    # It intentionally has no HTTP listener and must not inherit the image Web probe.
+    healthcheck:
+      disable: true

@@ -35,7 +35,21 @@ function safeSecretEqual(actual: string, expected: string): boolean {
     && timingSafeEqual(actualBytes, expectedBytes);
 }
 
-const REQUIRED_COMMERCE_SCOPE = 'commerce:data:read';
+export const REQUIRED_COMMERCE_SCOPE = 'commerce:data:read';
+export const COMMERCE_FEEDBACK_REVIEW_SCOPE = 'commerce:feedback:review';
+export const COMMERCE_NOTIFICATION_WRITE_SCOPE = 'commerce:notifications:write';
+const DEVELOPMENT_LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+function assertDevelopmentLoopback(request: NextRequest): void {
+  const hostname = request.nextUrl.hostname.trim().toLowerCase();
+  if (!DEVELOPMENT_LOOPBACK_HOSTS.has(hostname)) {
+    throw new CommerceAuthorizationError(
+      'DEV_AUTH_LOOPBACK_ONLY',
+      '开发鉴权绕过只允许从当前电脑访问。',
+      403,
+    );
+  }
+}
 
 function commerceScopes(value: string | null): string[] {
   const scopes = Array.from(new Set(
@@ -63,11 +77,15 @@ function commerceScopes(value: string | null): string[] {
 export function resolveCommerceIdentity(request: NextRequest): CommerceIdentity {
   const config = getCommerceAgentRuntimeConfig();
   if (config.developmentAuthBypass && process.env.NODE_ENV !== 'production') {
+    assertDevelopmentLoopback(request);
+    const developmentScopes = commerceScopes(
+      process.env.COMMERCE_DEV_SCOPES || REQUIRED_COMMERCE_SCOPE,
+    );
     return {
       tenantId: boundedIdentity(config.developmentTenantId, 'development tenant'),
       userId: boundedIdentity(config.developmentUserId, 'development user'),
       displayName: 'Local operator',
-      scopes: [REQUIRED_COMMERCE_SCOPE],
+      scopes: developmentScopes,
       authMode: 'development',
     };
   }
@@ -86,6 +104,20 @@ export function resolveCommerceIdentity(request: NextRequest): CommerceIdentity 
     scopes: commerceScopes(request.headers.get('x-commerce-scopes')),
     authMode: 'trusted_proxy',
   };
+}
+
+export function assertCommerceScope(identity: CommerceIdentity, scope: string): void {
+  if (!identity.scopes.includes(scope)) {
+    throw new CommerceAuthorizationError(
+      'COMMERCE_SCOPE_REQUIRED',
+      '当前身份没有执行此操作所需的 Commerce 权限。',
+      403,
+    );
+  }
+}
+
+export function assertCommerceFeedbackReviewer(identity: CommerceIdentity): void {
+  assertCommerceScope(identity, COMMERCE_FEEDBACK_REVIEW_SCOPE);
 }
 
 export function assertCommerceMutationOrigin(request: NextRequest): void {

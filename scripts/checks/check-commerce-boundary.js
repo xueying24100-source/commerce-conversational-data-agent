@@ -64,7 +64,6 @@ for (const removedPath of [
   'prisma',
   'services',
   'sqls',
-  'src/components',
   'src/lib/data-agent',
   'src/lib/domains/finance',
   'src/lib/eval',
@@ -124,6 +123,7 @@ for (const table of [
   'commerce_agent_evidence',
   'commerce_agent_jobs',
   'commerce_agent_job_events',
+  'commerce_agent_feedback',
   'commerce_agent_workers',
 ]) {
   if (!controlMigration.includes(table)) fail(`Control migration is missing table: ${table}`);

@@ -1,0 +1,135 @@
+{
+  "$id": "commerce-data-contract/v1",
+  "status": "frozen",
+  "frozenAt": "2026-08-16T00:00:00.000Z",
+  "recordGrain": "one tenant-local day x region x channel x sku",
+  "primaryKey": [
+    "tenant_id",
+    "source_id",
+    "metric_date",
+    "region",
+    "channel",
+    "sku"
+  ],
+  "requiredFields": {
+    "metric_date": "valid tenant-local YYYY-MM-DD",
+    "region": "non-empty text, maximum 120 characters",
+    "channel": "non-empty text, maximum 120 characters",
+    "sku": "non-empty stable product identifier, maximum 120 characters",
+    "category": "non-empty product category, maximum 120 characters; functionally determined by sku within a snapshot",
+    "business_timezone": "IANA timezone shared by every row in one tenant snapshot",
+    "data_mode": "snapshot or incremental",
+    "currency_code": "one ISO-4217 currency per tenant snapshot",
+    "visits": "non-negative integer",
+    "paid_orders": "non-negative integer not greater than visits",
+    "units": "non-negative integer",
+    "gmv": "non-negative decimal with at most two fraction digits",
+    "available_metrics": "explicit capability list",
+    "source_updated_at": "ISO-8601 instant"
+  },
+  "flagshipCapabilities": {
+    "metrics": [
+      "visits",
+      "paid_orders",
+      "gmv",
+      "conversion_rate",
+      "average_order_value"
+    ],
+    "dimensions": [
+      "channel",
+      "sku",
+      "category",
+      "region"
+    ],
+    "minimumCompleteDays": 90,
+    "minimumNonPlaceholderDimensionCoverage": 0.95
+  },
+  "metricDefinitions": {
+    "visits": {
+      "numerator": "SUM(visits)",
+      "denominator": null,
+      "aggregation": "additive only when adapter capability declares visits source-allocated at the record grain",
+      "unit": "integer"
+    },
+    "paid_orders": {
+      "numerator": "SUM(paid_orders)",
+      "denominator": null,
+      "aggregation": "additive",
+      "unit": "integer"
+    },
+    "gmv": {
+      "numerator": "SUM(gmv converted to integer minor units)",
+      "denominator": null,
+      "aggregation": "additive",
+      "unit": "currency"
+    },
+    "conversion_rate": {
+      "numerator": "SUM(paid_orders)",
+      "denominator": "SUM(visits)",
+      "zeroDenominator": null,
+      "aggregation": "ratio_of_sums",
+      "unit": "decimal ratio"
+    },
+    "average_order_value": {
+      "numerator": "SUM(gmv in unrounded minor units)",
+      "denominator": "SUM(paid_orders)",
+      "zeroDenominator": null,
+      "aggregation": "ratio_of_sums",
+      "unit": "currency"
+    }
+  },
+  "decimalAndRounding": {
+    "storageMinorUnits": 2,
+    "ingestRule": "reject values having more than two currency fraction digits",
+    "sumRule": "convert each accepted amount to integer minor units before aggregation",
+    "displayRule": "round half away from zero to two decimals only after all residual and contribution calculations",
+    "ratioTolerance": 0.000001,
+    "contributionResidualTolerance": 0.001
+  },
+  "deduplication": {
+    "snapshot": "replace the complete adapter-owned snapshot and reject duplicate primary keys",
+    "incremental": "upsert stable source_line_id facts, reconcile all lines for every observed source entity, then recompute touched serving buckets",
+    "sourceOwnership": "a tenant/source writer must hold the connector ownership and checkpoint fence"
+  },
+  "lateData": {
+    "completePartition": "a date is queryable only when every required source published ready coverage for that tenant-local date",
+    "zeroFactDay": "ready plus fact_row_count=0 is a valid zero-business day and is not missing data",
+    "materialCorrection": "never mutate completed Evidence silently; publish a versioned correction and create a superseding run",
+    "weeklyToleranceHours": 26
+  },
+  "capabilityDegradation": {
+    "required": "any unavailable flagship metric, unavailable flagship dimension, required-source audit failure, future/stale/missing required partition, or dimension coverage below 95% blocks flagship analysis and actions",
+    "optional": "refunds, margin, inventory, advertising, and business events may be unavailable; the run continues as degraded and may not make findings or actions about that capability",
+    "reconciliation": "KPI-tree decomposition is allowed only for same-source or explicitly audited cross-source numerator/denominator pairs"
+  },
+  "watermarkSynthesis": {
+    "source": "maximum source instant for which the adapter proves every preceding required tenant-local partition complete",
+    "multiSource": "minimum watermark across sources required by the selected metrics",
+    "snapshotConsistency": "one run freezes adapter revision, snapshot id, virtual clock, timezone, scope hash, and source watermarks before any business query"
+  },
+  "schemaEvolution": {
+    "withinV1": "new optional fields and optional capabilities may be added; meanings, primary key, required fields, metric formulas, and rounding rules may not change",
+    "breakingChange": "publish a new commerce-data-contract major version and require an explicit adapter migration",
+    "unknownFields": "readers may ignore unknown optional fields but must reject unknown enum values that affect semantics or safety"
+  },
+  "businessEvents": {
+    "optional": true,
+    "eventTypes": [
+      "price_change",
+      "campaign_change",
+      "promotion",
+      "restock",
+      "stockout"
+    ],
+    "requiredFields": [
+      "eventId",
+      "eventType",
+      "occurredAt",
+      "scope",
+      "source",
+      "confidence",
+      "scenarioMetadata"
+    ],
+    "causalBoundary": "temporal proximity alone never promotes an event-backed hypothesis to a causal driver"
+  }
+}

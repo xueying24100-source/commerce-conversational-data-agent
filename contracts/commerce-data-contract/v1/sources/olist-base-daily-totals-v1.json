@@ -1,0 +1,711 @@
+{
+  "schemaVersion": 1,
+  "sourceId": "olist-public-orders",
+  "sourceRevision": "d9e49802f3e92d09ee94ab9ccc5e457f207a8959",
+  "sourceSha256": "sha256:fb4269549e89bdd5f7bd62568b9150b12b6f1dea0a7a96fcd879448ae9bdd418",
+  "aggregation": "tenant-local day; included Olist paid statuses; item price excludes freight",
+  "start": "2018-01-01",
+  "end": "2018-05-20",
+  "days": [
+    {
+      "date": "2018-01-01",
+      "paidOrders": 73,
+      "gmvMinor": 694821
+    },
+    {
+      "date": "2018-01-02",
+      "paidOrders": 203,
+      "gmvMinor": 2531500
+    },
+    {
+      "date": "2018-01-03",
+      "paidOrders": 221,
+      "gmvMinor": 3128673
+    },
+    {
+      "date": "2018-01-04",
+      "paidOrders": 255,
+      "gmvMinor": 3483944
+    },
+    {
+      "date": "2018-01-05",
+      "paidOrders": 209,
+      "gmvMinor": 2772039
+    },
+    {
+      "date": "2018-01-06",
+      "paidOrders": 215,
+      "gmvMinor": 2760967
+    },
+    {
+      "date": "2018-01-07",
+      "paidOrders": 195,
+      "gmvMinor": 2943301
+    },
+    {
+      "date": "2018-01-08",
+      "paidOrders": 292,
+      "gmvMinor": 3871440
+    },
+    {
+      "date": "2018-01-09",
+      "paidOrders": 251,
+      "gmvMinor": 3024891
+    },
+    {
+      "date": "2018-01-10",
+      "paidOrders": 277,
+      "gmvMinor": 3847953
+    },
+    {
+      "date": "2018-01-11",
+      "paidOrders": 264,
+      "gmvMinor": 4005696
+    },
+    {
+      "date": "2018-01-12",
+      "paidOrders": 239,
+      "gmvMinor": 3098894
+    },
+    {
+      "date": "2018-01-13",
+      "paidOrders": 216,
+      "gmvMinor": 2809191
+    },
+    {
+      "date": "2018-01-14",
+      "paidOrders": 232,
+      "gmvMinor": 3096253
+    },
+    {
+      "date": "2018-01-15",
+      "paidOrders": 305,
+      "gmvMinor": 3833030
+    },
+    {
+      "date": "2018-01-16",
+      "paidOrders": 301,
+      "gmvMinor": 4423717
+    },
+    {
+      "date": "2018-01-17",
+      "paidOrders": 282,
+      "gmvMinor": 3608922
+    },
+    {
+      "date": "2018-01-18",
+      "paidOrders": 238,
+      "gmvMinor": 2777477
+    },
+    {
+      "date": "2018-01-19",
+      "paidOrders": 232,
+      "gmvMinor": 2995478
+    },
+    {
+      "date": "2018-01-20",
+      "paidOrders": 183,
+      "gmvMinor": 2223268
+    },
+    {
+      "date": "2018-01-21",
+      "paidOrders": 193,
+      "gmvMinor": 2370893
+    },
+    {
+      "date": "2018-01-22",
+      "paidOrders": 309,
+      "gmvMinor": 3704765
+    },
+    {
+      "date": "2018-01-23",
+      "paidOrders": 260,
+      "gmvMinor": 3432637
+    },
+    {
+      "date": "2018-01-24",
+      "paidOrders": 240,
+      "gmvMinor": 3141379
+    },
+    {
+      "date": "2018-01-25",
+      "paidOrders": 230,
+      "gmvMinor": 2952862
+    },
+    {
+      "date": "2018-01-26",
+      "paidOrders": 225,
+      "gmvMinor": 3377020
+    },
+    {
+      "date": "2018-01-27",
+      "paidOrders": 150,
+      "gmvMinor": 2154461
+    },
+    {
+      "date": "2018-01-28",
+      "paidOrders": 152,
+      "gmvMinor": 2367185
+    },
+    {
+      "date": "2018-01-29",
+      "paidOrders": 242,
+      "gmvMinor": 2998756
+    },
+    {
+      "date": "2018-01-30",
+      "paidOrders": 251,
+      "gmvMinor": 2883957
+    },
+    {
+      "date": "2018-01-31",
+      "paidOrders": 252,
+      "gmvMinor": 3230259
+    },
+    {
+      "date": "2018-02-01",
+      "paidOrders": 228,
+      "gmvMinor": 2998575
+    },
+    {
+      "date": "2018-02-02",
+      "paidOrders": 208,
+      "gmvMinor": 2761353
+    },
+    {
+      "date": "2018-02-03",
+      "paidOrders": 190,
+      "gmvMinor": 2308467
+    },
+    {
+      "date": "2018-02-04",
+      "paidOrders": 200,
+      "gmvMinor": 2381079
+    },
+    {
+      "date": "2018-02-05",
+      "paidOrders": 266,
+      "gmvMinor": 3686624
+    },
+    {
+      "date": "2018-02-06",
+      "paidOrders": 266,
+      "gmvMinor": 3390563
+    },
+    {
+      "date": "2018-02-07",
+      "paidOrders": 243,
+      "gmvMinor": 3112144
+    },
+    {
+      "date": "2018-02-08",
+      "paidOrders": 225,
+      "gmvMinor": 2707486
+    },
+    {
+      "date": "2018-02-09",
+      "paidOrders": 208,
+      "gmvMinor": 3057107
+    },
+    {
+      "date": "2018-02-10",
+      "paidOrders": 175,
+      "gmvMinor": 2112916
+    },
+    {
+      "date": "2018-02-11",
+      "paidOrders": 169,
+      "gmvMinor": 2243508
+    },
+    {
+      "date": "2018-02-12",
+      "paidOrders": 214,
+      "gmvMinor": 2325573
+    },
+    {
+      "date": "2018-02-13",
+      "paidOrders": 220,
+      "gmvMinor": 2351644
+    },
+    {
+      "date": "2018-02-14",
+      "paidOrders": 290,
+      "gmvMinor": 3683097
+    },
+    {
+      "date": "2018-02-15",
+      "paidOrders": 276,
+      "gmvMinor": 3196897
+    },
+    {
+      "date": "2018-02-16",
+      "paidOrders": 212,
+      "gmvMinor": 2689499
+    },
+    {
+      "date": "2018-02-17",
+      "paidOrders": 199,
+      "gmvMinor": 2484148
+    },
+    {
+      "date": "2018-02-18",
+      "paidOrders": 200,
+      "gmvMinor": 2449163
+    },
+    {
+      "date": "2018-02-19",
+      "paidOrders": 255,
+      "gmvMinor": 2786913
+    },
+    {
+      "date": "2018-02-20",
+      "paidOrders": 285,
+      "gmvMinor": 3641209
+    },
+    {
+      "date": "2018-02-21",
+      "paidOrders": 261,
+      "gmvMinor": 3210791
+    },
+    {
+      "date": "2018-02-22",
+      "paidOrders": 274,
+      "gmvMinor": 3115498
+    },
+    {
+      "date": "2018-02-23",
+      "paidOrders": 235,
+      "gmvMinor": 2842470
+    },
+    {
+      "date": "2018-02-24",
+      "paidOrders": 189,
+      "gmvMinor": 2421018
+    },
+    {
+      "date": "2018-02-25",
+      "paidOrders": 236,
+      "gmvMinor": 2905387
+    },
+    {
+      "date": "2018-02-26",
+      "paidOrders": 293,
+      "gmvMinor": 4363216
+    },
+    {
+      "date": "2018-02-27",
+      "paidOrders": 296,
+      "gmvMinor": 4015140
+    },
+    {
+      "date": "2018-02-28",
+      "paidOrders": 311,
+      "gmvMinor": 4548058
+    },
+    {
+      "date": "2018-03-01",
+      "paidOrders": 272,
+      "gmvMinor": 3938163
+    },
+    {
+      "date": "2018-03-02",
+      "paidOrders": 265,
+      "gmvMinor": 3177646
+    },
+    {
+      "date": "2018-03-03",
+      "paidOrders": 209,
+      "gmvMinor": 2609127
+    },
+    {
+      "date": "2018-03-04",
+      "paidOrders": 235,
+      "gmvMinor": 3244190
+    },
+    {
+      "date": "2018-03-05",
+      "paidOrders": 259,
+      "gmvMinor": 3811607
+    },
+    {
+      "date": "2018-03-06",
+      "paidOrders": 271,
+      "gmvMinor": 3917399
+    },
+    {
+      "date": "2018-03-07",
+      "paidOrders": 258,
+      "gmvMinor": 3613789
+    },
+    {
+      "date": "2018-03-08",
+      "paidOrders": 233,
+      "gmvMinor": 2799439
+    },
+    {
+      "date": "2018-03-09",
+      "paidOrders": 203,
+      "gmvMinor": 2840544
+    },
+    {
+      "date": "2018-03-10",
+      "paidOrders": 191,
+      "gmvMinor": 2596494
+    },
+    {
+      "date": "2018-03-11",
+      "paidOrders": 218,
+      "gmvMinor": 3132043
+    },
+    {
+      "date": "2018-03-12",
+      "paidOrders": 232,
+      "gmvMinor": 3064466
+    },
+    {
+      "date": "2018-03-13",
+      "paidOrders": 226,
+      "gmvMinor": 3577624
+    },
+    {
+      "date": "2018-03-14",
+      "paidOrders": 198,
+      "gmvMinor": 2352879
+    },
+    {
+      "date": "2018-03-15",
+      "paidOrders": 286,
+      "gmvMinor": 4431146
+    },
+    {
+      "date": "2018-03-16",
+      "paidOrders": 252,
+      "gmvMinor": 3283219
+    },
+    {
+      "date": "2018-03-17",
+      "paidOrders": 180,
+      "gmvMinor": 2007850
+    },
+    {
+      "date": "2018-03-18",
+      "paidOrders": 215,
+      "gmvMinor": 3111933
+    },
+    {
+      "date": "2018-03-19",
+      "paidOrders": 301,
+      "gmvMinor": 4458019
+    },
+    {
+      "date": "2018-03-20",
+      "paidOrders": 295,
+      "gmvMinor": 3543147
+    },
+    {
+      "date": "2018-03-21",
+      "paidOrders": 284,
+      "gmvMinor": 3958943
+    },
+    {
+      "date": "2018-03-22",
+      "paidOrders": 254,
+      "gmvMinor": 3111941
+    },
+    {
+      "date": "2018-03-23",
+      "paidOrders": 219,
+      "gmvMinor": 2962124
+    },
+    {
+      "date": "2018-03-24",
+      "paidOrders": 165,
+      "gmvMinor": 2378777
+    },
+    {
+      "date": "2018-03-25",
+      "paidOrders": 190,
+      "gmvMinor": 2555729
+    },
+    {
+      "date": "2018-03-26",
+      "paidOrders": 270,
+      "gmvMinor": 3572511
+    },
+    {
+      "date": "2018-03-27",
+      "paidOrders": 244,
+      "gmvMinor": 3472652
+    },
+    {
+      "date": "2018-03-28",
+      "paidOrders": 218,
+      "gmvMinor": 2968344
+    },
+    {
+      "date": "2018-03-29",
+      "paidOrders": 193,
+      "gmvMinor": 2884174
+    },
+    {
+      "date": "2018-03-30",
+      "paidOrders": 165,
+      "gmvMinor": 2208814
+    },
+    {
+      "date": "2018-03-31",
+      "paidOrders": 167,
+      "gmvMinor": 2520373
+    },
+    {
+      "date": "2018-04-01",
+      "paidOrders": 207,
+      "gmvMinor": 2939666
+    },
+    {
+      "date": "2018-04-02",
+      "paidOrders": 280,
+      "gmvMinor": 3972210
+    },
+    {
+      "date": "2018-04-03",
+      "paidOrders": 246,
+      "gmvMinor": 3624651
+    },
+    {
+      "date": "2018-04-04",
+      "paidOrders": 257,
+      "gmvMinor": 3798273
+    },
+    {
+      "date": "2018-04-05",
+      "paidOrders": 266,
+      "gmvMinor": 3605879
+    },
+    {
+      "date": "2018-04-06",
+      "paidOrders": 188,
+      "gmvMinor": 2750744
+    },
+    {
+      "date": "2018-04-07",
+      "paidOrders": 164,
+      "gmvMinor": 2551738
+    },
+    {
+      "date": "2018-04-08",
+      "paidOrders": 185,
+      "gmvMinor": 2346385
+    },
+    {
+      "date": "2018-04-09",
+      "paidOrders": 253,
+      "gmvMinor": 4930873
+    },
+    {
+      "date": "2018-04-10",
+      "paidOrders": 201,
+      "gmvMinor": 2787056
+    },
+    {
+      "date": "2018-04-11",
+      "paidOrders": 274,
+      "gmvMinor": 4078296
+    },
+    {
+      "date": "2018-04-12",
+      "paidOrders": 255,
+      "gmvMinor": 3411758
+    },
+    {
+      "date": "2018-04-13",
+      "paidOrders": 199,
+      "gmvMinor": 2985081
+    },
+    {
+      "date": "2018-04-14",
+      "paidOrders": 146,
+      "gmvMinor": 1884570
+    },
+    {
+      "date": "2018-04-15",
+      "paidOrders": 223,
+      "gmvMinor": 3052404
+    },
+    {
+      "date": "2018-04-16",
+      "paidOrders": 279,
+      "gmvMinor": 4035706
+    },
+    {
+      "date": "2018-04-17",
+      "paidOrders": 264,
+      "gmvMinor": 3665407
+    },
+    {
+      "date": "2018-04-18",
+      "paidOrders": 280,
+      "gmvMinor": 3947271
+    },
+    {
+      "date": "2018-04-19",
+      "paidOrders": 290,
+      "gmvMinor": 4308023
+    },
+    {
+      "date": "2018-04-20",
+      "paidOrders": 196,
+      "gmvMinor": 2835384
+    },
+    {
+      "date": "2018-04-21",
+      "paidOrders": 156,
+      "gmvMinor": 1896634
+    },
+    {
+      "date": "2018-04-22",
+      "paidOrders": 200,
+      "gmvMinor": 2735090
+    },
+    {
+      "date": "2018-04-23",
+      "paidOrders": 285,
+      "gmvMinor": 3767427
+    },
+    {
+      "date": "2018-04-24",
+      "paidOrders": 270,
+      "gmvMinor": 4304678
+    },
+    {
+      "date": "2018-04-25",
+      "paidOrders": 283,
+      "gmvMinor": 4094512
+    },
+    {
+      "date": "2018-04-26",
+      "paidOrders": 253,
+      "gmvMinor": 3140956
+    },
+    {
+      "date": "2018-04-27",
+      "paidOrders": 241,
+      "gmvMinor": 4068004
+    },
+    {
+      "date": "2018-04-28",
+      "paidOrders": 168,
+      "gmvMinor": 2342091
+    },
+    {
+      "date": "2018-04-29",
+      "paidOrders": 170,
+      "gmvMinor": 1930270
+    },
+    {
+      "date": "2018-04-30",
+      "paidOrders": 240,
+      "gmvMinor": 3568261
+    },
+    {
+      "date": "2018-05-01",
+      "paidOrders": 254,
+      "gmvMinor": 3296390
+    },
+    {
+      "date": "2018-05-02",
+      "paidOrders": 295,
+      "gmvMinor": 3855772
+    },
+    {
+      "date": "2018-05-03",
+      "paidOrders": 304,
+      "gmvMinor": 4249777
+    },
+    {
+      "date": "2018-05-04",
+      "paidOrders": 265,
+      "gmvMinor": 3973093
+    },
+    {
+      "date": "2018-05-05",
+      "paidOrders": 195,
+      "gmvMinor": 2823905
+    },
+    {
+      "date": "2018-05-06",
+      "paidOrders": 209,
+      "gmvMinor": 2828825
+    },
+    {
+      "date": "2018-05-07",
+      "paidOrders": 369,
+      "gmvMinor": 5321198
+    },
+    {
+      "date": "2018-05-08",
+      "paidOrders": 327,
+      "gmvMinor": 4780069
+    },
+    {
+      "date": "2018-05-09",
+      "paidOrders": 341,
+      "gmvMinor": 4356122
+    },
+    {
+      "date": "2018-05-10",
+      "paidOrders": 278,
+      "gmvMinor": 5038067
+    },
+    {
+      "date": "2018-05-11",
+      "paidOrders": 246,
+      "gmvMinor": 3785919
+    },
+    {
+      "date": "2018-05-12",
+      "paidOrders": 204,
+      "gmvMinor": 2960414
+    },
+    {
+      "date": "2018-05-13",
+      "paidOrders": 206,
+      "gmvMinor": 3131352
+    },
+    {
+      "date": "2018-05-14",
+      "paidOrders": 363,
+      "gmvMinor": 5370239
+    },
+    {
+      "date": "2018-05-15",
+      "paidOrders": 351,
+      "gmvMinor": 4105486
+    },
+    {
+      "date": "2018-05-16",
+      "paidOrders": 356,
+      "gmvMinor": 5623883
+    },
+    {
+      "date": "2018-05-17",
+      "paidOrders": 226,
+      "gmvMinor": 3145063
+    },
+    {
+      "date": "2018-05-18",
+      "paidOrders": 236,
+      "gmvMinor": 3162152
+    },
+    {
+      "date": "2018-05-19",
+      "paidOrders": 138,
+      "gmvMinor": 2508139
+    },
+    {
+      "date": "2018-05-20",
+      "paidOrders": 160,
+      "gmvMinor": 1952855
+    }
+  ]
+}

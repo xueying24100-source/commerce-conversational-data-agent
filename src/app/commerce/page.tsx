@@ -1,351 +1,68 @@
 'use client';
 
-import {
-  ArrowUp,
-  Bot,
-  Boxes,
-  Check,
-  ChevronRight,
-  CircleAlert,
-  Clock3,
-  Database,
-  FileSearch,
-  Fingerprint,
-  LoaderCircle,
-  Menu,
-  MessageSquareText,
-  PanelRight,
-  Plus,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  UserRound,
-  X,
-} from 'lucide-react';
+import { Database, LoaderCircle, ShieldAlert } from 'lucide-react';
 import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChatHeader } from '@/components/commerce/ChatHeader';
+import { ActiveJobsPanel } from '@/components/commerce/ActiveJobsPanel';
+import { ActionWorkbenchPanel } from '@/components/commerce/ActionWorkbenchPanel';
+import {
+  api,
+  commerceStarters,
+  CommerceApiError,
+  CommerceJobWaitError,
+  commerceBootstrapRetryDelay,
+  type ActionReviewPlan,
+  isConversationStillSelected,
+  isJobWaitCurrent,
+  isNonReplayableCommerceError,
+  recoveredJobDraft,
+  waitForAgentJob,
+} from '@/components/commerce/client';
+import { Composer } from '@/components/commerce/Composer';
+import { EvidenceRail } from '@/components/commerce/EvidenceRail';
+import { FeedbackReviewPanel } from '@/components/commerce/FeedbackReviewPanel';
+import { MessageList } from '@/components/commerce/MessageList';
+import { MobileConversationsPanel } from '@/components/commerce/MobileConversationsPanel';
+import { MobileEvidencePanel } from '@/components/commerce/MobileEvidencePanel';
+import { ReadinessGate, type ReadinessChecklistItem } from '@/components/commerce/ReadinessGate';
+import { Sidebar, type StatusTone } from '@/components/commerce/Sidebar';
+import type {
+  AgentJob,
+  ActionListItem,
+  ActionState,
+  Bootstrap,
+  Conversation,
+  ConversationSummary,
+  ModelId,
+  Readiness,
+} from '@/components/commerce/types';
+import { WelcomeScreen } from '@/components/commerce/WelcomeScreen';
 
-type ModelId =
-  | 'local_qwen:qwen3.5-9b-q5km'
-  | 'deepseek:deepseek-v4-flash'
-  | 'deepseek-v4-flash';
-
-type Readiness = {
-  ready: boolean;
-  issues: string[];
-  warnings: string[];
-  databaseConfigured: boolean;
-  analyticsConfigured: boolean;
-  modelConfigured: boolean;
-  authMode: 'development' | 'trusted_proxy';
-  checks?: {
-    configuration: boolean;
-    controlSchema: boolean;
-    workerActive: boolean;
-    analyticsSchema: boolean;
-    analyticsReadOnly: boolean;
-    analyticsRls: boolean;
-    analyticsDataPresent: boolean | null;
-    analyticsDataFresh: boolean | null;
-    analyticsSourceFresh: boolean | null;
-  };
-  dataStatus: {
-    dataMode: 'snapshot' | 'incremental';
-    coverageStart: string | null;
-    coverageEnd: string | null;
-    lastIngestedAt: string | null;
-    sourceUpdatedAt: string | null;
-  } | null;
+const DERIVED_FIELD_LABELS: Record<string, string> = {
+  visits: '访问量',
+  channel: '渠道',
+  region: '地区',
+  sku: 'SKU',
+  category: '品类',
+  units: '件数',
 };
-
-type Bootstrap = {
-  agent: {
-    id: string;
-    version: string;
-    runtime: string;
-    connector: string;
-    fallback: string;
-    models: ModelId[];
-    tools: string[];
-  };
-  identity: { displayName: string; authMode: string };
-  readiness: Readiness;
-};
-
-type ConversationSummary = {
-  id: string;
-  title: string;
-  model: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type EvidenceTrace = {
-  evidenceId: string;
-  operation: string;
-  fetchedAt: string;
-  rowCount: number;
-  requestSha256: string;
-  responseSha256: string;
-  sourceWatermark: string | null;
-  request: unknown;
-  preview: unknown;
-};
-
-type EvidenceClaim = {
-  evidenceId: string;
-  path: string;
-  metric: string;
-  value: number;
-  unit: 'currency' | 'integer' | 'decimal' | 'percent' | 'hours';
-};
-
-type AgentAnswer = {
-  status: 'answered' | 'needs_clarification' | 'refused';
-  answer: string;
-  answerClaims: EvidenceClaim[];
-  findings: Array<{ metric: string; title: string; detail: string; claims: EvidenceClaim[] }>;
-  recommendations: Array<{ action: string; rationale: string; claims: EvidenceClaim[] }>;
-  followUps: string[];
-};
-
-type ConversationMessage = {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  answer: AgentAnswer | null;
-  runId: string | null;
-  runStatus: 'running' | 'completed' | 'failed' | null;
-  traces: EvidenceTrace[];
-  createdAt: string;
-};
-
-type Conversation = ConversationSummary & { messages: ConversationMessage[] };
-
-type RunResult = {
-  conversation: ConversationSummary;
-  userMessage: ConversationMessage;
-  assistantMessage: ConversationMessage;
-  usage: { inputTokens: number; outputTokens: number; totalTokens: number };
-};
-
-type AgentJob = {
-  id: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'dead_letter';
-  result: RunResult | null;
-  error: { code: string; message: string } | null;
-};
-
-type ApiEnvelope<T> =
-  | ({ success: true } & T)
-  | { success: false; error: string; message: string; conversationId?: string };
-
-class CommerceApiError extends Error {
-  constructor(
-    message: string,
-    readonly code: string,
-    readonly status: number,
-    readonly conversationId: string | null,
-  ) {
-    super(message);
-    this.name = 'CommerceApiError';
-  }
-}
-
-const STARTERS = [
-  '分析 2018 年 8 月的 GMV、支付订单数和新客数。',
-  '按州拆解 2018 年 8 月的 GMV，找出贡献最高的地区。',
-  '展示 2018 年 1 月至 8 月的月度 GMV 和支付订单趋势。',
-];
-
-const MODEL_LABELS: Record<ModelId, string> = {
-  'local_qwen:qwen3.5-9b-q5km': 'Qwen 3.5 · ModelPort',
-  'deepseek:deepseek-v4-flash': 'DeepSeek V4 · ModelPort',
-  'deepseek-v4-flash': 'DeepSeek V4 · Official',
-};
-
-async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, {
-    ...init,
-    headers: {
-      ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-    cache: 'no-store',
-  });
-  const payload = await response.json() as ApiEnvelope<T>;
-  if (!response.ok || !payload.success) {
-    throw new CommerceApiError(
-      payload.success ? `请求失败（HTTP ${response.status}）。` : payload.message,
-      payload.success ? 'HTTP_ERROR' : payload.error,
-      response.status,
-      payload.success ? null : payload.conversationId ?? null,
-    );
-  }
-  return payload;
-}
-
-async function waitForAgentJob(
-  initial: AgentJob,
-  onStatus: (status: AgentJob['status']) => void,
-): Promise<RunResult> {
-  if (initial.status === 'completed' && initial.result) return initial.result;
-  if (initial.status === 'failed' || initial.status === 'dead_letter') {
-    throw new Error(initial.error?.message || 'Agent 异步任务失败。');
-  }
-  onStatus(initial.status);
-  return new Promise<RunResult>((resolve, reject) => {
-    const source = new EventSource(`/api/commerce/jobs/${encodeURIComponent(initial.id)}/events`);
-    const timeout = window.setTimeout(() => {
-      source.close();
-      reject(new Error('Agent 异步任务等待超时，可使用同一 requestId 重试。'));
-    }, 180_000);
-    const finish = async () => {
-      try {
-        const response = await api<{ job: AgentJob }>(
-          `/api/commerce/jobs/${encodeURIComponent(initial.id)}`,
-        );
-        onStatus(response.job.status);
-        if (response.job.status === 'completed' && response.job.result) {
-          window.clearTimeout(timeout);
-          source.close();
-          resolve(response.job.result);
-        } else if (response.job.status === 'failed' || response.job.status === 'dead_letter') {
-          window.clearTimeout(timeout);
-          source.close();
-          reject(new Error(response.job.error?.message || 'Agent 异步任务失败。'));
-        }
-      } catch (error) {
-        window.clearTimeout(timeout);
-        source.close();
-        reject(error);
-      }
-    };
-    source.addEventListener('queued', () => onStatus('queued'));
-    source.addEventListener('requeued', () => onStatus('queued'));
-    source.addEventListener('running', () => onStatus('running'));
-    source.addEventListener('completed', () => void finish());
-    source.addEventListener('failed', () => void finish());
-    source.addEventListener('dead_lettered', () => void finish());
-  });
-}
-
-function shortTime(value: string) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
-}
-
-function operationLabel(operation: string) {
-  const labels: Record<string, string> = {
-    'commerce.describe_data': '数据目录',
-    'commerce.lookup_entities': '实体检索',
-    'commerce.compare_metrics': '指标对比',
-    'commerce.breakdown_metric': '维度拆解',
-    'commerce.trend_metric': '趋势查询',
-    'commerce.inventory_risk': '库存风险',
-  };
-  return labels[operation] ?? operation;
-}
-
-function EvidenceIds({ ids }: { ids: string[] }) {
-  if (!ids.length) return null;
-  return (
-    <div className="mt-3 flex flex-wrap gap-1.5">
-      {ids.map((id) => (
-        <span
-          key={id}
-          className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 font-mono text-[10px] font-semibold text-blue-800"
-        >
-          <Fingerprint className="h-3 w-3" />
-          {id.slice(0, 11)}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function claimEvidenceIds(claims: EvidenceClaim[]): string[] {
-  return Array.from(new Set(claims.map((claim) => claim.evidenceId)));
-}
-
-function AssistantAnswer({ message, onFollowUp }: {
-  message: ConversationMessage;
-  onFollowUp: (question: string) => void;
-}) {
-  const answer = message.answer;
-  if (!answer) return <p className="whitespace-pre-wrap leading-7 text-slate-700">{message.content}</p>;
-  return (
-    <div className="space-y-5">
-      <p className="whitespace-pre-wrap text-[15px] leading-7 text-slate-800">{answer.answer}</p>
-      <EvidenceIds ids={claimEvidenceIds(answer.answerClaims)} />
-
-      {answer.findings.length ? (
-        <div className="grid gap-3 lg:grid-cols-2">
-          {answer.findings.map((finding) => (
-            <article key={`${finding.title}:${finding.detail}`} className="border-l-2 border-blue-600 bg-slate-50 px-4 py-3">
-              <h4 className="text-sm font-bold text-slate-950">{finding.title}</h4>
-              <p className="mt-1.5 whitespace-pre-wrap text-sm leading-6 text-slate-600">{finding.detail}</p>
-              <EvidenceIds ids={claimEvidenceIds(finding.claims)} />
-            </article>
-          ))}
-        </div>
-      ) : null}
-
-      {answer.recommendations.length ? (
-        <div className="border-t border-slate-200 pt-4">
-          <p className="mb-3 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
-            Recommended actions
-          </p>
-          <div className="space-y-3">
-            {answer.recommendations.map((recommendation, index) => (
-              <div key={`${recommendation.action}:${index}`} className="flex gap-3">
-                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-950 font-mono text-[10px] font-bold text-white">
-                  {index + 1}
-                </span>
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{recommendation.action}</p>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">{recommendation.rationale}</p>
-                  <EvidenceIds ids={claimEvidenceIds(recommendation.claims)} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {answer.followUps.length ? (
-        <div className="flex flex-wrap gap-2 border-t border-slate-200 pt-4">
-          {answer.followUps.map((followUp) => (
-            <button
-              key={followUp}
-              type="button"
-              onClick={() => onFollowUp(followUp)}
-              className="group inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {followUp}
-              <ChevronRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 export default function CommercePage() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [active, setActive] = useState<Conversation | null>(null);
-  const [selectedTrace, setSelectedTrace] = useState<EvidenceTrace | null>(null);
   const [mobilePanel, setMobilePanel] = useState<'conversations' | 'evidence' | null>(null);
+  const [feedbackReviewOpen, setFeedbackReviewOpen] = useState(false);
+  const [actionWorkbenchOpen, setActionWorkbenchOpen] = useState(false);
+  const [openActionCount, setOpenActionCount] = useState(0);
   const [draft, setDraft] = useState('');
   const [model, setModel] = useState<ModelId>('local_qwen:qwen3.5-9b-q5km');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [jobStatus, setJobStatus] = useState<AgentJob['status'] | null>(null);
+  const [activeJobs, setActiveJobs] = useState<AgentJob[]>([]);
+  const [waitingJobId, setWaitingJobId] = useState<string | null>(null);
+  const [jobConnection, setJobConnection] = useState<'connected' | 'reconnecting'>('connected');
   const [error, setError] = useState<string | null>(null);
   const [retryRequest, setRetryRequest] = useState<{
     message: string;
@@ -354,47 +71,125 @@ export default function CommercePage() {
     requestId: string;
   } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const navigationGenerationRef = useRef(0);
+  const waitAbortRef = useRef<AbortController | null>(null);
 
-  const traces = useMemo(
-    () => (active?.messages ?? []).flatMap((entry) => entry.role === 'assistant'
-      ? entry.traces
-      : []),
-    [active],
-  );
+  async function refreshOpenActionCount() {
+    try {
+      const response = await api<{ actions: ActionListItem[] }>('/api/commerce/actions?status=open&limit=100');
+      setOpenActionCount(response.actions.length);
+    } catch {
+      // The action workbench exposes its own retryable error; keep chat initialization usable.
+    }
+  }
+
+  function applyActionState(messageId: string, state: ActionState) {
+    setActive((current) => current ? {
+      ...current,
+      messages: current.messages.map((message) => {
+        if (message.id !== messageId) return message;
+        const existing = message.actionStates ?? [];
+        return {
+          ...message,
+          actionStates: [state, ...existing.filter((item) => item.actionId !== state.actionId)],
+        };
+      }),
+    } : current);
+    void refreshOpenActionCount();
+  }
+
+  function rememberActiveJob(job: AgentJob) {
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'dead_letter') {
+      setActiveJobs((current) => current.filter((entry) => entry.id !== job.id));
+      return;
+    }
+    setActiveJobs((current) => [job, ...current.filter((entry) => entry.id !== job.id)]);
+  }
+
+  function forgetActiveJob(jobId: string) {
+    setActiveJobs((current) => current.filter((entry) => entry.id !== jobId));
+  }
+
+  const evidenceContext = useMemo(() => {
+    const latestAnswer = [...(active?.messages ?? [])]
+      .reverse()
+      .find((entry) => entry.role === 'assistant' && entry.traces.length);
+    const answer = latestAnswer?.answer;
+    const rawClaims = answer ? [
+      ...answer.answerClaims,
+      ...answer.findings.flatMap((finding) => finding.claims),
+      ...answer.recommendations.flatMap((recommendation) => recommendation.claims),
+    ] : [];
+    const seen = new Set<string>();
+    const claims = rawClaims.filter((claim) => {
+      const key = `${claim.evidenceId}:${claim.path}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return { traces: latestAnswer?.traces ?? [], claims };
+  }, [active]);
+  const { traces, claims: evidenceClaims } = evidenceContext;
 
   useEffect(() => {
     let cancelled = false;
-    async function load() {
-      setLoading(true);
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeController: AbortController | null = null;
+    let requestGeneration = 0;
+    async function load(attempt = 0) {
+      const generation = ++requestGeneration;
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      if (attempt === 0) setLoading(true);
       try {
         const metadata = await api<{ agent: Bootstrap['agent']; identity: Bootstrap['identity']; readiness: Readiness }>(
           '/api/commerce',
+          { signal: controller.signal },
         );
-        if (cancelled) return;
+        if (cancelled || generation !== requestGeneration) return;
         const value = { agent: metadata.agent, identity: metadata.identity, readiness: metadata.readiness };
         setBootstrap(value);
         if (metadata.agent.models[0]) setModel(metadata.agent.models[0]);
         if (metadata.readiness.ready) {
-          const list = await api<{ conversations: ConversationSummary[] }>('/api/commerce/conversations');
-          if (!cancelled) setConversations(list.conversations);
+          const [list, pending] = await Promise.all([
+            api<{ conversations: ConversationSummary[] }>('/api/commerce/conversations'),
+            api<{ jobs: AgentJob[] }>('/api/commerce/jobs'),
+          ]);
+          if (!cancelled) {
+            setConversations(list.conversations);
+            setActiveJobs(pending.jobs);
+            void refreshOpenActionCount();
+          }
+        } else {
+          const retryDelay = commerceBootstrapRetryDelay(attempt);
+          if (retryDelay !== null) {
+            retryTimer = setTimeout(() => void load(attempt + 1), retryDelay);
+          }
         }
       } catch (caught) {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : '初始化 Commerce Agent 失败。');
+        if (!cancelled && generation === requestGeneration) {
+          setError(caught instanceof Error ? caught.message : '初始化 Commerce Agent 失败。');
+        }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && generation === requestGeneration) setLoading(false);
       }
     }
     void load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      requestGeneration += 1;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      activeController?.abort();
+    };
   }, []);
+
+  useEffect(() => () => waitAbortRef.current?.abort(), []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [active?.messages.length, sending]);
-
-  useEffect(() => {
-    setSelectedTrace(traces.at(-1) ?? null);
-  }, [traces]);
 
   useEffect(() => {
     if (!mobilePanel) return undefined;
@@ -411,9 +206,13 @@ export default function CommercePage() {
   }, [mobilePanel]);
 
   async function openConversation(id: string) {
+    waitAbortRef.current?.abort();
+    const navigationGeneration = ++navigationGenerationRef.current;
     setError(null);
     try {
       const response = await api<{ conversation: Conversation }>(`/api/commerce/conversations/${encodeURIComponent(id)}`);
+      if (navigationGeneration !== navigationGenerationRef.current) return;
+      activeConversationIdRef.current = response.conversation.id;
       setActive(response.conversation);
       setMobilePanel(null);
     } catch (caught) {
@@ -421,37 +220,136 @@ export default function CommercePage() {
     }
   }
 
+  async function openActionSource(conversationId: string, messageId: string) {
+    await openConversation(conversationId);
+    setActionWorkbenchOpen(false);
+    globalThis.setTimeout(() => {
+      document.getElementById(`commerce-message-${messageId}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }, 0);
+  }
+
+  function navigateToEvidence(evidenceId: string) {
+    const mobile = globalThis.matchMedia('(max-width: 1279px)').matches;
+    if (mobile) {
+      setMobilePanel('evidence');
+    }
+    let attempts = 0;
+    const focusTarget = () => {
+      const target = document.getElementById(`${mobile ? 'mobile-evidence' : 'evidence'}-${evidenceId}`);
+      if (!target && attempts < 4) {
+        attempts += 1;
+        globalThis.setTimeout(focusTarget, 25);
+        return;
+      }
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target?.focus({ preventScroll: true });
+    };
+    globalThis.setTimeout(focusTarget, 0);
+  }
+
+  async function reviewCompletedAction(item: ActionListItem, plan: ActionReviewPlan) {
+    if (sending || !bootstrap?.readiness.ready) return;
+    if (
+      plan.status !== 'ready'
+      || !plan.question
+      || !plan.current
+      || !plan.baseline
+      || !plan.reviewEnd
+    ) return;
+    const navigationGeneration = ++navigationGenerationRef.current;
+    setError(null);
+    try {
+      const response = await api<{ conversation: Conversation }>(
+        `/api/commerce/conversations/${encodeURIComponent(item.conversationId)}`,
+      );
+      if (navigationGeneration !== navigationGenerationRef.current) return;
+      activeConversationIdRef.current = response.conversation.id;
+      setActive(response.conversation);
+      setConversations((current) => [
+        {
+          id: response.conversation.id,
+          title: response.conversation.title,
+          model: response.conversation.model,
+          createdAt: response.conversation.createdAt,
+          updatedAt: response.conversation.updatedAt,
+        },
+        ...current.filter((entry) => entry.id !== response.conversation.id),
+      ]);
+      setActionWorkbenchOpen(false);
+      void send(undefined, plan.question, false, response.conversation, {
+        item,
+        plan: {
+          ...plan,
+          status: 'ready',
+          question: plan.question,
+          current: plan.current,
+          baseline: plan.baseline,
+          reviewEnd: plan.reviewEnd,
+        },
+        requestId: `review:${crypto.randomUUID()}`,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '无法加载行动来源会话。');
+    }
+  }
+
   function startNewConversation() {
+    waitAbortRef.current?.abort();
+    navigationGenerationRef.current += 1;
+    activeConversationIdRef.current = null;
     setActive(null);
-    setSelectedTrace(null);
     setError(null);
     setMobilePanel(null);
   }
 
-  async function send(event?: FormEvent) {
+  async function send(
+    event?: FormEvent,
+    overrideMessage?: string,
+    forceNewRequest = false,
+    targetConversation?: Conversation,
+    actionReview?: {
+      item: ActionListItem;
+      plan: ActionReviewPlan & {
+        status: 'ready';
+        question: string;
+        current: NonNullable<ActionReviewPlan['current']>;
+        baseline: NonNullable<ActionReviewPlan['baseline']>;
+        reviewEnd: string;
+      };
+      requestId: string;
+    },
+  ) {
     event?.preventDefault();
-    const message = draft.trim();
+    const message = (overrideMessage ?? draft).trim();
     if (sending || message.length < 2 || !bootstrap?.readiness.ready) return;
     setSending(true);
     setJobStatus('queued');
     setError(null);
-    setDraft('');
-    const optimistic: ConversationMessage = {
+    if (overrideMessage === undefined) setDraft('');
+    const optimistic = {
       id: `pending_${crypto.randomUUID()}`,
-      role: 'user',
+      role: 'user' as const,
       content: message,
       answer: null,
       runId: null,
-      runStatus: 'running',
+      runStatus: 'running' as const,
+      reportAvailable: false,
       traces: [],
       createdAt: new Date().toISOString(),
     };
+    const requestConversation = targetConversation ?? active;
+    const requestConversationId = requestConversation?.id ?? null;
     setActive((current) => current
       ? { ...current, messages: [...current.messages, optimistic] }
       : null);
+    let trackedJob: AgentJob | null = null;
+    let waitController: AbortController | null = null;
     try {
-      const conversationId = active?.id ?? null;
-      const reusableRequest = retryRequest
+      const conversationId = requestConversationId;
+      const reusableRequest = !forceNewRequest && retryRequest
         && retryRequest.message === message
         && retryRequest.conversationId === conversationId
         && retryRequest.model === model
@@ -459,23 +357,61 @@ export default function CommercePage() {
         : null;
       const requestId = reusableRequest?.requestId ?? `req_${crypto.randomUUID()}`;
       setRetryRequest({ message, conversationId, model, requestId });
-      const endpoint = active
-        ? `/api/commerce/conversations/${encodeURIComponent(active.id)}/messages`
+      const endpoint = requestConversation
+        ? `/api/commerce/conversations/${encodeURIComponent(requestConversation.id)}/messages`
         : '/api/commerce/conversations';
-      const body = active
+      const body = requestConversation
         ? { message, requestId }
         : { message, requestId, model };
       const response = await api<{ job: AgentJob }>(endpoint, {
         method: 'POST',
         body: JSON.stringify(body),
       });
-      const result = await waitForAgentJob(response.job, setJobStatus);
-      const next: Conversation = active
+      trackedJob = response.job;
+      rememberActiveJob(response.job);
+      waitController = new AbortController();
+      waitAbortRef.current = waitController;
+      setWaitingJobId(response.job.id);
+      const result = await waitForAgentJob(response.job, (status) => {
+        if (isConversationStillSelected(activeConversationIdRef.current, requestConversationId)) {
+          setJobStatus(status);
+        }
+      }, {
+        signal: waitController.signal,
+        onConnectionChange: setJobConnection,
+      });
+      let actionReviewWarning: string | null = null;
+      if (actionReview) {
+        if (!result.assistantMessage.runId) {
+          actionReviewWarning = '复盘已生成，但缺少 Run ID，未能写入行动复盘记录。';
+        } else {
+          try {
+            await api<{ receipt: { id: string } }>(
+              `/api/commerce/conversations/${encodeURIComponent(actionReview.item.conversationId)}/messages/${encodeURIComponent(actionReview.item.messageId)}/actions/${encodeURIComponent(actionReview.item.actionId)}/reviews`,
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  runId: result.assistantMessage.runId,
+                  reviewMessageId: result.assistantMessage.id,
+                  question: actionReview.plan.question,
+                  plan: actionReview.plan,
+                  requestId: actionReview.requestId,
+                }),
+              },
+            );
+          } catch (caught) {
+            actionReviewWarning = caught instanceof Error
+              ? `复盘已生成，但行动关联记录保存失败：${caught.message}`
+              : '复盘已生成，但行动关联记录保存失败。';
+          }
+        }
+      }
+      const next: Conversation = requestConversation
         ? {
-            ...active,
+            ...requestConversation,
             ...result.conversation,
             messages: [
-              ...active.messages.filter((entry) => entry.id !== optimistic.id),
+              ...requestConversation.messages.filter((entry) => entry.id !== optimistic.id),
               result.userMessage,
               result.assistantMessage,
             ],
@@ -484,19 +420,33 @@ export default function CommercePage() {
             ...result.conversation,
             messages: [result.userMessage, result.assistantMessage],
           };
-      setActive(next);
+      if (isConversationStillSelected(activeConversationIdRef.current, requestConversationId)) {
+        activeConversationIdRef.current = next.id;
+        setActive(next);
+      }
       setRetryRequest(null);
+      forgetActiveJob(response.job.id);
       setConversations((current) => [
         result.conversation,
         ...current.filter((entry) => entry.id !== result.conversation.id),
       ]);
+      if (actionReviewWarning) setError(actionReviewWarning);
+      void refreshOpenActionCount();
     } catch (caught) {
-      if (caught instanceof CommerceApiError && caught.conversationId) {
+      const failedConversationId = caught instanceof CommerceApiError
+        ? caught.conversationId
+        : caught instanceof CommerceJobWaitError
+          ? caught.job.conversationId
+          : null;
+      if (failedConversationId) {
         try {
           const failed = await api<{ conversation: Conversation }>(
-            `/api/commerce/conversations/${encodeURIComponent(caught.conversationId)}`,
+            `/api/commerce/conversations/${encodeURIComponent(failedConversationId)}`,
           );
-          setActive(failed.conversation);
+          if (isConversationStillSelected(activeConversationIdRef.current, requestConversationId)) {
+            activeConversationIdRef.current = failed.conversation.id;
+            setActive(failed.conversation);
+          }
           setConversations((current) => [
             failed.conversation,
             ...current.filter((entry) => entry.id !== failed.conversation.id),
@@ -505,25 +455,89 @@ export default function CommercePage() {
           // Keep the original execution error visible if reloading the durable run fails.
         }
       }
-      if (
-        caught instanceof CommerceApiError
-        && (
-          caught.status === 502
-          || caught.code === 'COMMERCE_REQUEST_NOT_REPLAYABLE'
-          || caught.code === 'COMMERCE_IDEMPOTENCY_CONFLICT'
-        )
-      ) {
+      if (isNonReplayableCommerceError(caught)) {
         setRetryRequest(null);
       }
-      setDraft(message);
-      setActive((current) => current
-        ? { ...current, messages: current.messages.filter((entry) => entry.id !== optimistic.id) }
-        : current);
-      setError(caught instanceof Error ? caught.message : 'Agent 运行失败。');
+      if (caught instanceof CommerceJobWaitError && caught.kind === 'terminal') {
+        forgetActiveJob(caught.job.id);
+      } else if (trackedJob) {
+        rememberActiveJob(caught instanceof CommerceJobWaitError ? caught.job : trackedJob);
+      }
+      if (isConversationStillSelected(activeConversationIdRef.current, requestConversationId)) {
+        if (!(caught instanceof CommerceJobWaitError && caught.kind === 'aborted')) {
+          setDraft(message);
+        }
+        setActive((current) => current
+          ? { ...current, messages: current.messages.filter((entry) => entry.id !== optimistic.id) }
+          : current);
+        if (!(caught instanceof CommerceJobWaitError && caught.kind === 'aborted')) {
+          setError(caught instanceof Error ? caught.message : 'Agent 运行失败。');
+        }
+      }
     } finally {
-      setSending(false);
-      setJobStatus(null);
+      if (trackedJob) {
+        const trackedJobId = trackedJob.id;
+        setWaitingJobId((current) => (
+          isJobWaitCurrent(current, trackedJobId) ? null : current
+        ));
+      }
+      if (!waitController || waitAbortRef.current === waitController) {
+        waitAbortRef.current = null;
+        setSending(false);
+        if (isConversationStillSelected(activeConversationIdRef.current, requestConversationId)) {
+          setJobStatus(null);
+        }
+      }
     }
+  }
+
+  async function resumeJob(job: AgentJob) {
+    if (waitAbortRef.current) return;
+    setError(null);
+    setSending(true);
+    setJobStatus(job.status);
+    setWaitingJobId(job.id);
+    setJobConnection('connected');
+    const controller = new AbortController();
+    waitAbortRef.current = controller;
+    try {
+      const result = await waitForAgentJob(job, setJobStatus, {
+        signal: controller.signal,
+        onConnectionChange: setJobConnection,
+      });
+      forgetActiveJob(job.id);
+      setRetryRequest((current) => current?.requestId === job.requestId ? null : current);
+      const loaded = await api<{ conversation: Conversation }>(
+        `/api/commerce/conversations/${encodeURIComponent(result.conversation.id)}`,
+      );
+      activeConversationIdRef.current = loaded.conversation.id;
+      setActive(loaded.conversation);
+      setConversations((current) => [
+        result.conversation,
+        ...current.filter((entry) => entry.id !== result.conversation.id),
+      ]);
+    } catch (caught) {
+      if (caught instanceof CommerceJobWaitError && caught.kind === 'terminal') {
+        forgetActiveJob(caught.job.id);
+        setRetryRequest((current) => current?.requestId === job.requestId ? null : current);
+        setDraft(recoveredJobDraft(job, caught.kind) ?? '');
+        setError(`${caught.message} 已准备使用新的任务重新分析。`);
+      } else if (!(caught instanceof CommerceJobWaitError && caught.kind === 'aborted')) {
+        rememberActiveJob(caught instanceof CommerceJobWaitError ? caught.job : job);
+        setError(caught instanceof Error ? caught.message : '恢复后台任务失败。');
+      }
+    } finally {
+      if (waitAbortRef.current === controller) {
+        waitAbortRef.current = null;
+        setSending(false);
+        setJobStatus(null);
+      }
+      setWaitingJobId((current) => isJobWaitCurrent(current, job.id) ? null : current);
+    }
+  }
+
+  function stopWaiting() {
+    waitAbortRef.current?.abort();
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -535,580 +549,208 @@ export default function CommercePage() {
 
   const ready = bootstrap?.readiness.ready === true;
   const snapshotReady = ready && bootstrap?.readiness.dataStatus?.dataMode === 'snapshot';
+  const sourceDisclosure = bootstrap?.readiness.dataStatus?.sourceDisclosure ?? null;
+  const derivedFieldLabels = sourceDisclosure?.generatedFields
+    .map((field) => DERIVED_FIELD_LABELS[field] ?? field)
+    .join('、');
   const checkingReadiness = loading || (!bootstrap && !error);
   const initializationFailed = !loading && !bootstrap && Boolean(error);
+  const starters = commerceStarters(
+    bootstrap?.readiness.dataStatus ?? null,
+    bootstrap?.agent.features?.diagnosticPolicyEnabled !== false,
+  );
+
+  const sidebarStatus: { label: string; tone: StatusTone } = snapshotReady
+    ? { label: '历史快照可用', tone: 'warning' }
+    : ready
+      ? { label: '系统就绪', tone: 'success' }
+      : checkingReadiness
+        ? { label: '正在检查', tone: 'info' }
+        : initializationFailed
+          ? { label: '初始化失败', tone: 'error' }
+          : { label: '等待配置', tone: 'warning' };
+
+  const readinessChecklist: ReadinessChecklistItem[] = [
+    {
+      number: '01',
+      label: '经营数据库',
+      done: Boolean(
+        bootstrap?.readiness.analyticsConfigured
+        && bootstrap.readiness.checks?.analyticsSchema
+        && bootstrap.readiness.checks.analyticsReadOnly
+        && bootstrap.readiness.checks.analyticsRls
+        && bootstrap.readiness.checks.analyticsDataPresent
+        && bootstrap.readiness.checks.analyticsDataFresh
+        && bootstrap.readiness.checks.analyticsSourceFresh !== false,
+      ),
+    },
+    {
+      number: '02',
+      label: '会话数据库与 Worker',
+      done: Boolean(
+        bootstrap?.readiness.databaseConfigured
+        && bootstrap.readiness.checks?.controlSchema
+        && bootstrap.readiness.checks.workerActive,
+      ),
+    },
+    { number: '03', label: '模型 Provider', done: Boolean(bootstrap?.readiness.modelConfigured) },
+  ];
 
   return (
-    <main className="min-h-screen bg-[#e8edf3] text-slate-950">
-      <div className="mx-auto flex min-h-screen max-w-[1780px] flex-col bg-[#f7f9fc] shadow-[0_0_70px_rgba(15,23,42,0.12)]">
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-300/80 bg-white px-4 sm:px-6">
-          <div className="flex items-center gap-3">
-            <div className="relative grid h-9 w-9 place-items-center overflow-hidden rounded-lg bg-blue-700 text-white">
-              <Boxes className="h-5 w-5" />
-              <span className="absolute bottom-0 left-0 h-1 w-full bg-cyan-300" />
-            </div>
-            <div>
-              <p className="font-[Bahnschrift] text-[15px] font-bold uppercase tracking-[0.08em] text-slate-950">
-                Commerce Signal Desk
-              </p>
-              <p className="font-mono text-[10px] text-slate-500">Production Data Agent · evidence-bound</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span
-              aria-live="polite"
-              className={`hidden items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold sm:inline-flex ${
-                snapshotReady
-                  ? 'border-amber-200 bg-amber-50 text-amber-800'
-                  : ready
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                  : checkingReadiness
-                    ? 'border-blue-200 bg-blue-50 text-blue-800'
-                    : initializationFailed
-                      ? 'border-red-200 bg-red-50 text-red-800'
-                      : 'border-amber-200 bg-amber-50 text-amber-800'
-              }`}
-            >
-              {snapshotReady ? (
-                <Database className="h-3.5 w-3.5" />
-              ) : ready ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : checkingReadiness ? (
-                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <CircleAlert className="h-3.5 w-3.5" />
-              )}
-              {snapshotReady
-                ? '历史快照可用'
-                : ready
-                  ? '系统就绪'
-                : checkingReadiness
-                  ? '正在检查'
-                  : initializationFailed
-                    ? '初始化失败'
-                    : '等待配置'}
+    <main className="flex h-screen overflow-hidden bg-[#F5F3FF] text-indigo-950">
+      <Sidebar
+        conversations={conversations}
+        activeId={active?.id ?? null}
+        onSelectConversation={(id) => void openConversation(id)}
+        onNewConversation={startNewConversation}
+        onOpenActions={() => setActionWorkbenchOpen(true)}
+        actionCount={openActionCount}
+        identityName={bootstrap?.identity.displayName ?? 'IDENTITY PENDING'}
+        identityContext={bootstrap
+          ? `${bootstrap.identity.authMode === 'development' ? '本地开发身份' : '可信身份代理'} · ${bootstrap.identity.tenantId}`
+          : '正在验证身份'}
+        status={sidebarStatus}
+      />
+
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#F5F3FF]">
+        <ChatHeader
+          title={active?.title ?? '新的经营问题'}
+          subtitle={`${active ? active.model : bootstrap?.agent.models[0] ?? model} · PostgreSQL read-only · ${
+            bootstrap?.readiness.dataStatus?.dataMode === 'snapshot' ? '历史快照' : '增量数据'
+          }`}
+          evidenceCount={traces.length}
+          onOpenConversations={() => setMobilePanel('conversations')}
+          onOpenEvidence={() => setMobilePanel('evidence')}
+          onOpenActions={() => setActionWorkbenchOpen(true)}
+          actionCount={openActionCount}
+          onOpenFeedbackReview={bootstrap?.identity.scopes.includes('commerce:feedback:review')
+            ? () => setFeedbackReviewOpen(true)
+            : undefined}
+        />
+
+        {bootstrap?.identity.authMode === 'development' ? (
+          <div className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-4 py-2.5 text-xs leading-5 text-red-900 sm:px-6">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+            <span>
+              开发鉴权绕过已开启，仅允许当前电脑访问；生产环境必须由可信身份代理注入用户、租户和
+              commerce:data:read 权限。
             </span>
-            <span className="hidden rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-[10px] text-slate-600 sm:inline-block">
-              {bootstrap?.identity.displayName ?? 'IDENTITY PENDING'}
-            </span>
-          </div>
-        </header>
-
-        <div className="grid min-h-0 flex-1 xl:grid-cols-[260px_minmax(520px,1fr)_330px]">
-          <aside className="hidden min-h-0 flex-col border-r border-slate-300/80 bg-[#eef2f7] xl:flex">
-            <div className="border-b border-slate-300/80 p-4">
-              <button
-                type="button"
-                onClick={startNewConversation}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-              >
-                <Plus className="h-4 w-4" />
-                新建分析会话
-              </button>
-            </div>
-            <div className="flex items-center gap-2 px-4 pb-2 pt-4 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
-              <MessageSquareText className="h-3.5 w-3.5" />
-              Conversations
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-              {conversations.length ? conversations.map((conversation) => (
-                <button
-                  key={conversation.id}
-                  type="button"
-                  onClick={() => void openConversation(conversation.id)}
-                  className={`mb-1 w-full rounded-lg px-3 py-3 text-left transition focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    active?.id === conversation.id
-                      ? 'bg-white shadow-sm ring-1 ring-slate-200'
-                      : 'hover:bg-white/70'
-                  }`}
-                >
-                  <p className="line-clamp-2 text-xs font-bold leading-5 text-slate-800">{conversation.title}</p>
-                  <p className="mt-1.5 flex items-center gap-1 font-mono text-[9px] text-slate-500">
-                    <Clock3 className="h-3 w-3" /> {shortTime(conversation.updatedAt)}
-                  </p>
-                </button>
-              )) : (
-                <p className="px-3 py-6 text-xs leading-5 text-slate-500">创建第一条真实数据分析会话后，它会出现在这里。</p>
-              )}
-            </div>
-            <div className="border-t border-slate-300/80 p-4">
-              <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                <ShieldCheck className="h-4 w-4 text-emerald-700" />
-                Tenant-scoped reads
-              </div>
-              <p className="mt-2 text-[11px] leading-5 text-slate-500">无规则 fallback · 无任意 SQL · 全量运行审计</p>
-            </div>
-          </aside>
-
-          <section className="flex min-h-[calc(100vh-4rem)] min-w-0 flex-col bg-white">
-            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-6">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-slate-900">{active?.title ?? '新的经营问题'}</p>
-                <p className="mt-0.5 font-mono text-[10px] text-slate-500">
-                  {active ? active.model : MODEL_LABELS[model]} · PostgreSQL read-only · {
-                    bootstrap?.readiness.dataStatus?.dataMode === 'snapshot' ? '历史快照' : '增量数据'
-                  }
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 xl:hidden">
-                <button
-                  type="button"
-                  onClick={() => setMobilePanel('conversations')}
-                  aria-label="打开会话列表"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-[11px] font-bold text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <Menu className="h-4 w-4" /> 会话
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMobilePanel('evidence')}
-                  aria-label={`打开证据面板，共 ${traces.length} 条证据`}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-2 text-[11px] font-bold text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <PanelRight className="h-4 w-4" /> {traces.length}
-                </button>
-              </div>
-            </div>
-
-            {ready && bootstrap.readiness.warnings.length ? (
-              <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-5 text-amber-950 sm:px-6">
-                <Database className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
-                <span>{bootstrap.readiness.warnings[0]}</span>
-              </div>
-            ) : null}
-
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {loading ? (
-                <div className="grid min-h-[520px] place-items-center">
-                  <div className="text-center text-sm text-slate-500">
-                    <LoaderCircle className="mx-auto mb-3 h-6 w-6 animate-spin text-blue-700" />
-                    正在校验生产依赖
-                  </div>
-                </div>
-              ) : !ready ? (
-                <div className="mx-auto flex min-h-[560px] max-w-3xl items-center px-6 py-14">
-                  <div className="w-full border border-amber-300 bg-amber-50 p-6 shadow-[8px_8px_0_#dbe4ee] sm:p-8">
-                    <div className="flex items-start gap-4">
-                      <div className="grid h-10 w-10 shrink-0 place-items-center bg-amber-400 text-amber-950">
-                        <CircleAlert className="h-5 w-5" />
-                      </div>
-                      <div>
-                        <p className="font-[Bahnschrift] text-lg font-bold uppercase tracking-wide text-slate-950">Production gate closed</p>
-                        <p className="mt-2 text-sm leading-6 text-slate-700">
-                          Agent 不会使用样例数据或规则答案绕过依赖。完成以下配置并执行数据库迁移后才会开放提问。
-                        </p>
-                      </div>
-                    </div>
-                    <ul className="mt-6 space-y-2">
-                      {(bootstrap?.readiness.issues ?? [error ?? '无法读取 readiness。']).map((issue) => (
-                        <li key={issue} className="flex items-start gap-2 border-t border-amber-200 py-2 text-sm text-amber-950">
-                          <ChevronRight className="mt-0.5 h-4 w-4 shrink-0" />
-                          {issue}
-                        </li>
-                      ))}
-                    </ul>
-                    <div className="mt-6 grid gap-3 sm:grid-cols-3">
-                      {[
-                        [
-                          '01',
-                          '经营数据库',
-                          bootstrap?.readiness.analyticsConfigured
-                            && bootstrap.readiness.checks?.analyticsSchema
-                            && bootstrap.readiness.checks.analyticsReadOnly
-                            && bootstrap.readiness.checks.analyticsRls
-                            && bootstrap.readiness.checks.analyticsDataPresent
-                            && bootstrap.readiness.checks.analyticsDataFresh
-                            && bootstrap.readiness.checks.analyticsSourceFresh !== false,
-                        ],
-                        [
-                          '02',
-                          '会话数据库与 Worker',
-                          bootstrap?.readiness.databaseConfigured
-                            && bootstrap.readiness.checks?.controlSchema
-                            && bootstrap.readiness.checks.workerActive,
-                        ],
-                        ['03', '模型 Provider', bootstrap?.readiness.modelConfigured],
-                      ].map(([number, label, done]) => (
-                        <div key={String(number)} className="bg-white/70 p-3">
-                          <p className="font-mono text-[10px] font-bold text-amber-700">{number}</p>
-                          <p className="mt-1 text-xs font-bold text-slate-800">{label}</p>
-                          <p className={`mt-2 text-[10px] font-semibold ${done ? 'text-emerald-700' : 'text-amber-700'}`}>
-                            {done ? 'CONFIGURED' : 'REQUIRED'}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : active?.messages.length ? (
-                <div className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6">
-                  {active.messages.map((entry) => entry.role === 'user' ? (
-                    <div key={entry.id} className="mb-8 flex justify-end gap-3">
-                      <div className="max-w-[82%] rounded-2xl rounded-tr-sm bg-blue-700 px-4 py-3 text-sm leading-6 text-white shadow-sm">
-                        {entry.content}
-                      </div>
-                      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-slate-200 text-slate-600">
-                        <UserRound className="h-4 w-4" />
-                      </div>
-                    </div>
-                  ) : (
-                    <div key={entry.id} className="mb-10 flex gap-3">
-                      <div className="relative grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg bg-slate-950 text-white">
-                        <Bot className="h-4 w-4" />
-                        <span className="absolute bottom-0 h-0.5 w-full bg-cyan-300" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="mb-2 flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-bold text-slate-900">Commerce Data Agent</span>
-                          <span className="rounded bg-slate-100 px-2 py-0.5 font-mono text-[9px] text-slate-500">
-                            {entry.traces.length} evidence receipts
-                          </span>
-                        </div>
-                        <AssistantAnswer message={entry} onFollowUp={setDraft} />
-                      </div>
-                    </div>
-                  ))}
-                  {sending ? (
-                    <div className="mb-8 flex gap-3">
-                      <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-950 text-white">
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                      </div>
-                      <div className="border-l-2 border-cyan-400 px-4 py-2">
-                        <p className="text-sm font-bold text-slate-800">
-                          {jobStatus === 'queued' ? '任务正在等待 Worker' : '正在查询经营数据'}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {jobStatus === 'queued'
-                            ? '任务已持久化，可以安全等待队列调度。'
-                            : 'Agent 会自行选择指标、趋势或拆解工具，然后校验证据。'}
-                        </p>
-                      </div>
-                    </div>
-                  ) : null}
-                  <div ref={endRef} />
-                </div>
-              ) : (
-                <div className="mx-auto flex min-h-[560px] max-w-3xl flex-col justify-center px-6 py-14">
-                  <div className="mb-8 flex items-center gap-3">
-                    <span className="h-px flex-1 bg-slate-200" />
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-blue-700">Ask the operation</span>
-                    <span className="h-px flex-1 bg-slate-200" />
-                  </div>
-                  <h1 className="text-balance text-center font-[Bahnschrift] text-3xl font-bold leading-tight tracking-[-0.02em] text-slate-950 sm:text-4xl">
-                    从真实经营数据开始，<br className="hidden sm:block" />而不是从预设报告开始。
-                  </h1>
-                  <p className="mx-auto mt-4 max-w-xl text-center text-sm leading-6 text-slate-600">
-                    可追问日期、地区、渠道、GMV、订单、新客和件数。未声明指标会拒答，不补零、不猜测。
-                  </p>
-                  <div className="mt-9 grid gap-2">
-                    {STARTERS.map((starter) => (
-                      <button
-                        key={starter}
-                        type="button"
-                        onClick={() => setDraft(starter)}
-                        className="group flex items-center justify-between border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm text-slate-700 transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <span>{starter}</span>
-                        <ArrowUp className="h-4 w-4 rotate-45 text-slate-400 transition group-hover:text-blue-700" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="border-t border-slate-200 bg-[#f7f9fc] p-3 sm:p-4">
-              {error ? (
-                <div className="mx-auto mb-3 flex max-w-4xl items-start gap-2 border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-                  <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                  {error}
-                </div>
-              ) : null}
-              <form onSubmit={(event) => void send(event)} className="mx-auto max-w-4xl">
-                {!active ? (
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <select
-                      value={model}
-                      onChange={(event) => setModel(event.target.value as ModelId)}
-                      disabled={sending || !ready}
-                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200 disabled:opacity-50"
-                    >
-                      {(bootstrap?.agent.models ?? Object.keys(MODEL_LABELS) as ModelId[]).map((id) => (
-                        <option key={id} value={id}>{MODEL_LABELS[id]}</option>
-                      ))}
-                    </select>
-                    <span className="font-mono text-[9px] text-slate-400">NEW CONVERSATION MODEL</span>
-                  </div>
-                ) : null}
-                <div className="flex items-end gap-2 rounded-xl border border-slate-300 bg-white p-2 shadow-sm transition focus-within:border-blue-500 focus-within:ring-4 focus-within:ring-blue-100">
-                  <textarea
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                    onKeyDown={onComposerKeyDown}
-                    disabled={sending || !ready}
-                    rows={2}
-                    maxLength={4_000}
-                    placeholder={ready ? '询问经营数据；Enter 发送，Shift + Enter 换行' : '完成生产配置后开放提问'}
-                    className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed"
-                  />
-                  <button
-                    type="submit"
-                    disabled={sending || !ready || draft.trim().length < 2}
-                    aria-label="发送问题"
-                    className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-blue-700 text-white transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300"
-                  >
-                    {sending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </section>
-
-          <aside className="hidden min-h-0 flex-col border-l border-slate-300/80 bg-[#f4f7fa] xl:flex">
-            <div className="border-b border-slate-300/80 px-5 py-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-[Bahnschrift] text-xs font-bold uppercase tracking-[0.12em] text-slate-900">Evidence rail</p>
-                  <p className="mt-1 font-mono text-[9px] text-slate-500">ALL COMPLETED TURNS</p>
-                </div>
-                <FileSearch className="h-4 w-4 text-blue-700" />
-              </div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              {traces.length ? (
-                <>
-                  <div className="relative space-y-2 before:absolute before:bottom-3 before:left-[17px] before:top-3 before:w-px before:bg-blue-200">
-                    {traces.map((trace, index) => (
-                      <button
-                        key={trace.evidenceId}
-                        type="button"
-                        onClick={() => setSelectedTrace(trace)}
-                        className={`relative flex w-full items-start gap-3 rounded-lg border p-3 text-left transition focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                          selectedTrace?.evidenceId === trace.evidenceId
-                            ? 'border-blue-300 bg-white shadow-sm'
-                            : 'border-transparent bg-transparent hover:bg-white/80'
-                        }`}
-                      >
-                        <span className="relative z-10 grid h-9 w-9 shrink-0 place-items-center rounded-md bg-blue-700 font-mono text-[10px] font-bold text-white">
-                          {String(index + 1).padStart(2, '0')}
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-xs font-bold text-slate-800">{operationLabel(trace.operation)}</span>
-                          <span className="mt-1 block font-mono text-[9px] text-slate-500">{trace.rowCount} rows · {shortTime(trace.fetchedAt)}</span>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                  {selectedTrace ? (
-                    <div className="mt-5 border-t border-slate-300 pt-4">
-                      <div className="mb-3 grid grid-cols-2 gap-2 text-[10px]">
-                        <div className="bg-white p-2">
-                          <p className="font-mono text-slate-400">OPERATION</p>
-                          <p className="mt-1 truncate font-bold text-slate-700">{operationLabel(selectedTrace.operation)}</p>
-                        </div>
-                        <div className="bg-white p-2">
-                          <p className="font-mono text-slate-400">ROWS</p>
-                          <p className="mt-1 font-bold text-slate-700">{selectedTrace.rowCount}</p>
-                        </div>
-                      </div>
-                      <div className="mb-2 flex items-center gap-2 font-mono text-[9px] font-bold text-slate-500">
-                        <FileSearch className="h-3.5 w-3.5" /> VALIDATED REQUEST
-                      </div>
-                      <pre className="mb-4 max-h-48 overflow-auto whitespace-pre-wrap break-words border border-slate-200 bg-slate-50 p-3 font-mono text-[9px] leading-5 text-slate-700">
-                        {JSON.stringify(selectedTrace.request, null, 2)}
-                      </pre>
-                      <p className="mb-4 break-all font-mono text-[8px] leading-4 text-slate-400">
-                        SOURCE WATERMARK · {selectedTrace.sourceWatermark ?? 'unavailable'}
-                      </p>
-                      <div className="mb-2 flex items-center gap-2 font-mono text-[9px] font-bold text-slate-500">
-                        <Database className="h-3.5 w-3.5" /> RESULT PREVIEW
-                      </div>
-                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-slate-200 bg-slate-950 p-3 font-mono text-[9px] leading-5 text-cyan-100">
-                        {JSON.stringify(selectedTrace.preview, null, 2)}
-                      </pre>
-                      <p className="mt-2 break-all font-mono text-[8px] leading-4 text-slate-400">
-                        {selectedTrace.responseSha256}
-                      </p>
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <div className="mt-10 text-center">
-                  <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-dashed border-slate-300 text-slate-400">
-                    <Search className="h-5 w-5" />
-                  </div>
-                  <p className="mt-4 text-xs font-bold text-slate-600">还没有查询证据</p>
-                  <p className="mt-2 text-[11px] leading-5 text-slate-500">Agent 调用数据工具后，查询操作、行数、时间和内容哈希会显示在这里。</p>
-                </div>
-              )}
-            </div>
-            <div className="border-t border-slate-300/80 p-4">
-              <div className="grid grid-cols-2 gap-2 text-[10px]">
-                <div className="border border-slate-200 bg-white p-2.5">
-                  <Sparkles className="h-3.5 w-3.5 text-blue-700" />
-                  <p className="mt-2 font-bold text-slate-700">MoAgent loop</p>
-                </div>
-                <div className="border border-slate-200 bg-white p-2.5">
-                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-700" />
-                  <p className="mt-2 font-bold text-slate-700">Fail closed</p>
-                </div>
-              </div>
-            </div>
-          </aside>
-        </div>
-
-        {mobilePanel ? (
-          <div className="fixed inset-0 z-50 xl:hidden">
-            <button
-              type="button"
-              aria-label="关闭侧边面板"
-              onClick={() => setMobilePanel(null)}
-              className="absolute inset-0 bg-slate-950/45 backdrop-blur-[1px]"
-            />
-
-            {mobilePanel === 'conversations' ? (
-              <aside
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="mobile-conversations-title"
-                className="absolute inset-y-0 left-0 flex w-[min(90vw,380px)] flex-col border-r border-slate-300 bg-[#eef2f7] shadow-2xl"
-              >
-                <div className="flex h-16 items-center justify-between border-b border-slate-300 px-4">
-                  <div>
-                    <p id="mobile-conversations-title" className="font-[Bahnschrift] text-sm font-bold uppercase tracking-[0.08em] text-slate-950">
-                      Conversations
-                    </p>
-                    <p className="mt-0.5 font-mono text-[9px] text-slate-500">TENANT-SCOPED HISTORY</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setMobilePanel(null)}
-                    aria-label="关闭会话列表"
-                    className="grid h-9 w-9 place-items-center rounded-md border border-slate-300 bg-white text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="border-b border-slate-300 p-4">
-                  <button
-                    type="button"
-                    onClick={startNewConversation}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-3 text-sm font-bold text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                  >
-                    <Plus className="h-4 w-4" /> 新建分析会话
-                  </button>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-2">
-                  {conversations.length ? conversations.map((conversation) => (
-                    <button
-                      key={conversation.id}
-                      type="button"
-                      onClick={() => void openConversation(conversation.id)}
-                      className={`mb-1 w-full rounded-lg px-3 py-3 text-left focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                        active?.id === conversation.id
-                          ? 'bg-white shadow-sm ring-1 ring-slate-200'
-                          : 'hover:bg-white/70'
-                      }`}
-                    >
-                      <p className="line-clamp-2 text-xs font-bold leading-5 text-slate-800">{conversation.title}</p>
-                      <p className="mt-1.5 flex items-center gap-1 font-mono text-[9px] text-slate-500">
-                        <Clock3 className="h-3 w-3" /> {shortTime(conversation.updatedAt)}
-                      </p>
-                    </button>
-                  )) : (
-                    <p className="px-3 py-8 text-xs leading-5 text-slate-500">
-                      创建第一条真实数据分析会话后，它会出现在这里。
-                    </p>
-                  )}
-                </div>
-                <div className="border-t border-slate-300 p-4 text-[11px] leading-5 text-slate-500">
-                  <span className="inline-flex items-center gap-2 font-bold text-slate-700">
-                    <ShieldCheck className="h-4 w-4 text-emerald-700" /> Tenant-scoped reads
-                  </span>
-                </div>
-              </aside>
-            ) : (
-              <aside
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="mobile-evidence-title"
-                className="absolute inset-y-0 right-0 flex w-[min(94vw,430px)] flex-col border-l border-slate-300 bg-[#f4f7fa] shadow-2xl"
-              >
-                <div className="flex h-16 items-center justify-between border-b border-slate-300 px-4">
-                  <div>
-                    <p id="mobile-evidence-title" className="font-[Bahnschrift] text-sm font-bold uppercase tracking-[0.08em] text-slate-950">
-                      Evidence rail
-                    </p>
-                    <p className="mt-0.5 font-mono text-[9px] text-slate-500">{traces.length} RECEIPTS · ALL TURNS</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setMobilePanel(null)}
-                    aria-label="关闭证据面板"
-                    className="grid h-9 w-9 place-items-center rounded-md border border-slate-300 bg-white text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                  {traces.length ? (
-                    <>
-                      <div className="grid gap-2">
-                        {traces.map((trace, index) => (
-                          <button
-                            key={trace.evidenceId}
-                            type="button"
-                            onClick={() => setSelectedTrace(trace)}
-                            className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                              selectedTrace?.evidenceId === trace.evidenceId
-                                ? 'border-blue-300 bg-white shadow-sm'
-                                : 'border-slate-200 bg-white/55'
-                            }`}
-                          >
-                            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-blue-700 font-mono text-[10px] font-bold text-white">
-                              {String(index + 1).padStart(2, '0')}
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-bold text-slate-800">{operationLabel(trace.operation)}</span>
-                              <span className="mt-1 block font-mono text-[9px] text-slate-500">{trace.rowCount} rows · {shortTime(trace.fetchedAt)}</span>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                      {selectedTrace ? (
-                        <div className="mt-5 border-t border-slate-300 pt-4">
-                          <p className="mb-2 font-mono text-[9px] font-bold text-slate-500">VALIDATED REQUEST</p>
-                          <pre className="mb-4 max-h-48 overflow-auto whitespace-pre-wrap break-words border border-slate-200 bg-white p-3 font-mono text-[9px] leading-5 text-slate-700">
-                            {JSON.stringify(selectedTrace.request, null, 2)}
-                          </pre>
-                          <p className="mb-4 break-all font-mono text-[8px] leading-4 text-slate-400">
-                            SOURCE WATERMARK · {selectedTrace.sourceWatermark ?? 'unavailable'}
-                          </p>
-                          <p className="mb-2 font-mono text-[9px] font-bold text-slate-500">RESULT PREVIEW</p>
-                          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-slate-200 bg-slate-950 p-3 font-mono text-[9px] leading-5 text-cyan-100">
-                            {JSON.stringify(selectedTrace.preview, null, 2)}
-                          </pre>
-                          <p className="mt-2 break-all font-mono text-[8px] leading-4 text-slate-400">
-                            {selectedTrace.responseSha256}
-                          </p>
-                        </div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <div className="mt-12 text-center">
-                      <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-dashed border-slate-300 text-slate-400">
-                        <Search className="h-5 w-5" />
-                      </div>
-                      <p className="mt-4 text-xs font-bold text-slate-600">还没有查询证据</p>
-                      <p className="mt-2 text-[11px] leading-5 text-slate-500">Agent 完成数据查询后，可在这里检查请求、结果、水位和哈希。</p>
-                    </div>
-                  )}
-                </div>
-              </aside>
-            )}
           </div>
         ) : null}
-      </div>
+
+        {ready && bootstrap.readiness.warnings.length ? (
+          <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-5 text-amber-900 sm:px-6">
+            <Database className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+            <span>{bootstrap.readiness.warnings[0]}</span>
+          </div>
+        ) : null}
+
+        {ready && sourceDisclosure ? (
+          <div className="flex items-start gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2.5 text-xs leading-5 text-sky-950 sm:px-6">
+            <Database className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+            <span>
+              <strong>公开演示数据披露：</strong>
+              支付订单与 GMV 日总量来自固定的 Olist 公开快照；
+              {derivedFieldLabels || '钻取字段'}为 seed {sourceDisclosure.fixtureSeed ?? '未声明'}
+              的确定性演示派生字段，不是 Olist 原始观测，也不代表真实商户。
+              来源 {sourceDisclosure.sourceId} · {sourceDisclosure.licenseId} · revision{' '}
+              {sourceDisclosure.sourceRevision.slice(0, 12)}。
+            </span>
+          </div>
+        ) : null}
+
+        {ready ? (
+          <ActiveJobsPanel
+            jobs={activeJobs}
+            waitingJobId={waitingJobId}
+            connection={jobConnection}
+            onResume={(job) => void resumeJob(job)}
+            onStopWaiting={stopWaiting}
+          />
+        ) : null}
+
+        <div className="min-h-0 flex-1 overflow-y-auto" tabIndex={0} aria-label="对话内容">
+          {loading ? (
+            <div className="grid min-h-[520px] place-items-center">
+              <div className="text-center text-sm text-violet-500">
+                <LoaderCircle className="mx-auto mb-3 h-6 w-6 animate-spin text-violet-500" />
+                正在校验生产依赖
+              </div>
+            </div>
+          ) : !ready ? (
+            <ReadinessGate issues={bootstrap?.readiness.issues ?? [error ?? '无法读取 readiness。']} checklist={readinessChecklist} />
+          ) : active?.messages.length ? (
+            <MessageList
+              conversationId={active.id}
+              messages={active.messages}
+              sending={sending}
+              jobStatus={jobStatus}
+              onFollowUp={setDraft}
+              onActionChange={applyActionState}
+              onEvidenceNavigate={navigateToEvidence}
+              onRetryFailed={(message) => void send(undefined, message, true)}
+              endRef={endRef}
+            />
+          ) : (
+            <WelcomeScreen
+              starters={starters}
+              dataStatus={bootstrap?.readiness.dataStatus ?? null}
+              onPickStarter={setDraft}
+            />
+          )}
+        </div>
+
+        <Composer
+          draft={draft}
+          onDraftChange={setDraft}
+          onKeyDown={onComposerKeyDown}
+          onSubmit={(event) => void send(event)}
+          sending={sending}
+          ready={ready}
+          error={error}
+          isNewConversation={!active}
+          model={model}
+          availableModels={bootstrap?.agent.models ?? []}
+          onModelChange={setModel}
+        />
+      </section>
+
+      <EvidenceRail
+        traces={traces}
+        claims={evidenceClaims}
+        pending={sending ? { jobStatus } : null}
+        currencyCode={bootstrap?.readiness.dataStatus?.currencyCode ?? undefined}
+      />
+
+      {mobilePanel === 'conversations' ? (
+        <MobileConversationsPanel
+          conversations={conversations}
+          activeId={active?.id ?? null}
+          onSelect={(id) => void openConversation(id)}
+          onNewConversation={startNewConversation}
+          onClose={() => setMobilePanel(null)}
+        />
+      ) : null}
+      {mobilePanel === 'evidence' ? (
+        <MobileEvidencePanel
+          traces={traces}
+          claims={evidenceClaims}
+          pending={sending ? { jobStatus } : null}
+          currencyCode={bootstrap?.readiness.dataStatus?.currencyCode ?? undefined}
+          onClose={() => setMobilePanel(null)}
+        />
+      ) : null}
+      <FeedbackReviewPanel open={feedbackReviewOpen} onClose={() => setFeedbackReviewOpen(false)} />
+      <ActionWorkbenchPanel
+        open={actionWorkbenchOpen}
+        businessTimeZone={bootstrap?.readiness.dataStatus?.businessTimezone ?? null}
+        dataStatus={bootstrap?.readiness.dataStatus ?? null}
+        onClose={() => setActionWorkbenchOpen(false)}
+        onOpenConversation={(conversationId, messageId) => void openActionSource(conversationId, messageId)}
+        onReview={(item, question) => void reviewCompletedAction(item, question)}
+        onOpenCountChange={setOpenActionCount}
+        onActionChange={applyActionState}
+      />
     </main>
   );
 }

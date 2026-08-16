@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 function loadLocalEnv(root) {
+  if (process.env.COMMERCE_DISABLE_LOCAL_ENV_FILES === '1') return;
   if (typeof process.loadEnvFile !== 'function') {
     throw new Error('Node.js 22+ is required to load local environment files.');
   }

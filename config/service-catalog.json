@@ -8,7 +8,7 @@
       "command": "node scripts/runtime/start-commerce.js",
       "liveness": "/api/health",
       "readiness": "/api/health/ready",
-      "dependencies": ["commerce-control-db", "commerce-analytics-db", "model-provider", "commerce-worker"]
+      "dependencies": ["commerce-control-api-db", "commerce-analytics-db", "model-provider", "commerce-worker"]
     },
     {
       "id": "commerce-worker",
@@ -16,7 +16,7 @@
       "kind": "worker",
       "command": "node scripts/runtime/commerce-worker.js",
       "readinessSignal": "commerce_agent_workers.heartbeat_at",
-      "dependencies": ["commerce-control-db", "commerce-analytics-db", "model-provider"]
+      "dependencies": ["commerce-control-worker-db", "commerce-analytics-db", "model-provider"]
     },
     {
       "id": "commerce-connector",
@@ -27,10 +27,17 @@
       "dependencies": ["commerce-analytics-db"]
     },
     {
-      "id": "commerce-control-db",
+      "id": "commerce-control-api-db",
       "runtime": "postgresql",
       "kind": "database",
-      "env": "COMMERCE_DATABASE_URL",
+      "env": "COMMERCE_CONTROL_API_DATABASE_URL",
+      "migration": "migrations/commerce-control.sql"
+    },
+    {
+      "id": "commerce-control-worker-db",
+      "runtime": "postgresql",
+      "kind": "database",
+      "env": "COMMERCE_CONTROL_WORKER_DATABASE_URL",
       "migration": "migrations/commerce-control.sql"
     },
     {

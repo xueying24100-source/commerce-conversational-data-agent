@@ -119,9 +119,27 @@ async function collectRootBuildInfo() {
     .map((entry) => path.join(ROOT, entry.name));
 }
 
+async function collectRootTemporaryDirectories() {
+  const entries = await fs.readdir(ROOT, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('.tmp-'))
+    .map((entry) => path.join(ROOT, entry.name));
+}
+
 async function collectTargets() {
   const targets = new Set(BASE_TARGETS.map((item) => path.join(ROOT, item)));
+  const temporaryRoot = path.join(ROOT, 'tmp');
+  if (await exists(temporaryRoot)) {
+    // Treat immediate children independently so one Windows file lock cannot keep
+    // unrelated reports/caches from being removed.
+    targets.delete(temporaryRoot);
+    const entries = await fs.readdir(temporaryRoot, { withFileTypes: true });
+    for (const entry of entries) targets.add(path.join(temporaryRoot, entry.name));
+  }
   for (const target of await collectRootBuildInfo()) {
+    targets.add(target);
+  }
+  for (const target of await collectRootTemporaryDirectories()) {
     targets.add(target);
   }
   for (const target of await collectNamedDirs(ROOT, CACHE_DIR_NAMES, { maxDepth: 5 })) {
@@ -157,19 +175,34 @@ async function main() {
     return;
   }
 
+  const failures = [];
+  let removedBytes = 0;
+  let removedCount = 0;
   for (const { target, bytes } of targets) {
     const label = `${relative(target)} (${formatBytes(bytes)})`;
     if (dryRun) {
       console.log(`[clean-local] would remove ${label}`);
     } else {
-      await fs.rm(target, { recursive: true, force: true });
-      console.log(`[clean-local] removed ${label}`);
+      try {
+        await fs.rm(target, { recursive: true, force: true });
+        removedBytes += bytes;
+        removedCount += 1;
+        console.log(`[clean-local] removed ${label}`);
+      } catch (error) {
+        failures.push({ target, error });
+        console.warn(`[clean-local] could not remove ${label}: ${error?.code || error}`);
+      }
     }
   }
 
   console.log(
-    `[clean-local] ${dryRun ? 'would remove' : 'removed'} ${targets.length} path(s), ${formatBytes(totalBytes)} total`
+    dryRun
+      ? `[clean-local] would remove ${targets.length} path(s), ${formatBytes(totalBytes)} total`
+      : `[clean-local] removed ${removedCount} path(s), ${formatBytes(removedBytes)} total`,
   );
+  if (failures.length) {
+    throw new Error(`Unable to remove ${failures.length} locked path(s): ${failures.map(({ target }) => relative(target)).join(', ')}`);
+  }
 }
 
 main().catch((error) => {

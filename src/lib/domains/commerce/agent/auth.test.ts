@@ -1,7 +1,11 @@
 import { NextRequest } from 'next/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { CommerceAuthorizationError, resolveCommerceIdentity } from './auth';
+import {
+  assertCommerceFeedbackReviewer,
+  CommerceAuthorizationError,
+  resolveCommerceIdentity,
+} from './auth';
 
 const PROXY_SECRET = 'lR4eTZ9_nwQt2P8SsHjDcVYmB7uXgL1Kf6AoC3zWvNi5QpRx';
 
@@ -25,6 +29,19 @@ describe('Commerce trusted identity boundary', () => {
       userId: 'operator_test',
       authMode: 'development',
     });
+  });
+
+  it('rejects development auth bypass over a non-loopback address', () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('COMMERCE_DEV_AUTH_BYPASS', '1');
+    vi.stubEnv('COMMERCE_DEV_TENANT_ID', 'tenant_test');
+    vi.stubEnv('COMMERCE_DEV_USER_ID', 'operator_test');
+
+    expect(() => resolveCommerceIdentity(
+      new NextRequest('http://192.168.1.20:3000/api/commerce'),
+    )).toThrowError(
+      expect.objectContaining({ code: 'DEV_AUTH_LOOPBACK_ONLY', status: 403 }),
+    );
   });
 
   it('requires proxy-injected identity and a constant-time shared secret in production', () => {
@@ -81,5 +98,18 @@ describe('Commerce trusted identity boundary', () => {
     expect(() => resolveCommerceIdentity(request)).toThrowError(
       expect.objectContaining({ code: 'COMMERCE_ACCESS_DENIED', status: 403 }),
     );
+  });
+
+  it('requires an independent scope for tenant-wide feedback review', () => {
+    const base = {
+      tenantId: 'tenant_acme', userId: 'reviewer_1', displayName: 'Reviewer',
+      scopes: ['commerce:data:read'], authMode: 'trusted_proxy' as const,
+    };
+    expect(() => assertCommerceFeedbackReviewer(base)).toThrowError(
+      expect.objectContaining({ code: 'COMMERCE_SCOPE_REQUIRED', status: 403 }),
+    );
+    expect(() => assertCommerceFeedbackReviewer({
+      ...base, scopes: [...base.scopes, 'commerce:feedback:review'],
+    })).not.toThrow();
   });
 });

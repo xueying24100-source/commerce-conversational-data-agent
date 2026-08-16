@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   assertRestoreDrillTarget,
   postgresCliConnection,
+  postgresDatabaseFingerprint,
   postgresCliSslEnvironment,
 } = require('./postgres-cli.js');
 
@@ -42,6 +43,23 @@ describe('PostgreSQL CLI safety helpers', () => {
       .not.toThrow();
     expect(() => assertRestoreDrillTarget({ database: 'commerce_production' }, 'control'))
       .toThrow('database name must contain');
+    expect(() => assertRestoreDrillTarget({ database: 'latest_production' }, 'control'))
+      .toThrow('delimited');
+  });
+
+  it('binds a backup to its host, port and database without exposing the URL', () => {
+    const first = postgresCliConnection(
+      'postgresql://backup_user:secret@db.internal:5433/commerce_control',
+      'source',
+    );
+    const sameDatabaseDifferentCredential = postgresCliConnection(
+      'postgresql://another:other@DB.INTERNAL:5433/commerce_control',
+      'source',
+    );
+    expect(postgresDatabaseFingerprint(first)).toBe(
+      postgresDatabaseFingerprint(sameDatabaseDifferentCredential),
+    );
+    expect(postgresDatabaseFingerprint(first)).toMatch(/^sha256:[0-9a-f]{64}$/u);
   });
 
   it('requires verified TLS for production CLI operations', () => {

@@ -3,15 +3,32 @@ import type { Config } from 'tailwindcss'
 const config: Config = {
   content: [
     './src/app/**/*.{ts,tsx}',
+    './src/components/**/*.{ts,tsx}',
     './src/contexts/**/*.{ts,tsx}',
   ],
   darkMode: 'class',
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['var(--font-inter)', 'Inter', 'system-ui', '-apple-system', 'sans-serif'],
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+      },
+      boxShadow: {
+        glow: '0 0 20px rgba(139, 92, 246, 0.15)',
+        'glow-lg': '0 0 30px rgba(139, 92, 246, 0.25)',
+      },
+      keyframes: {
+        'fade-in-up': {
+          from: { opacity: '0', transform: 'translateY(6px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
+      },
+      animation: {
+        'fade-in-up': 'fade-in-up 300ms ease-out',
       },
       colors: {
         border: 'hsl(var(--border))',
@@ -22,6 +39,9 @@ const config: Config = {
         primary: {
           DEFAULT: 'hsl(var(--primary))',
           foreground: 'hsl(var(--primary-foreground))',
+          400: '#A78BFA',
+          500: '#8B5CF6',
+          600: '#7C3AED',
         },
         secondary: {
           DEFAULT: 'hsl(var(--secondary))',

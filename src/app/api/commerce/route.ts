@@ -2,7 +2,10 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { resolveCommerceIdentity } from '@/lib/domains/commerce/agent/auth';
 import { commerceApiError } from '@/lib/domains/commerce/agent/api';
-import { configuredCommerceModels } from '@/lib/domains/commerce/agent/config';
+import {
+  configuredCommerceModels,
+  getCommerceAgentRuntimeConfig,
+} from '@/lib/domains/commerce/agent/config';
 import { checkCommerceReadiness } from '@/lib/domains/commerce/agent/readiness';
 import {
   DEEPSEEK_MODEL_ID,
@@ -17,6 +20,7 @@ export async function GET(request: NextRequest) {
   try {
     const identity = resolveCommerceIdentity(request);
     const readiness = await checkCommerceReadiness(identity.tenantId);
+    const config = getCommerceAgentRuntimeConfig();
     return NextResponse.json({
       success: true,
       agent: {
@@ -27,11 +31,20 @@ export async function GET(request: NextRequest) {
         connector: 'postgresql-readonly',
         sessionStore: 'postgresql',
         fallback: 'disabled',
+        features: {
+          diagnosticPolicyEnabled: config.diagnosticPolicyEnabled,
+          anomalyDetectionEnabled: config.anomalyDetectionEnabled,
+          notificationsEnabled: config.notificationsEnabled,
+          automaticReviewEnabled: config.automaticReviewEnabled,
+          weeklyDiagnosisEnabled: config.weeklyDiagnosisEnabled,
+        },
         models: configuredCommerceModels().length
           ? configuredCommerceModels()
           : [LOCAL_QWEN_MODEL_ID, MODELPORT_DEEPSEEK_MODEL_ID, DEEPSEEK_MODEL_ID],
         tools: [
           'describe_commerce_data',
+          'inspect_commerce_data_health',
+          'scan_weekly_commerce_kpis',
           'lookup_commerce_entities',
           'compare_commerce_metrics',
           'breakdown_commerce_metric',
@@ -43,6 +56,9 @@ export async function GET(request: NextRequest) {
       identity: {
         displayName: identity.displayName,
         authMode: identity.authMode,
+        tenantId: identity.tenantId,
+        userId: identity.userId,
+        scopes: identity.scopes,
       },
       readiness: {
         ...readiness.configuration,

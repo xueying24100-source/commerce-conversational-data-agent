@@ -3,7 +3,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { MoAgentTokenUsage } from '@/lib/agent/types';
 import type { CommerceDatabase, CommerceSqlClient } from './database';
 import {
+  buildReportArtifact,
+  insertReportArtifact,
+  newCommerceReportId,
+} from './report-store';
+import {
   commerceAgentAnswerSchema,
+  commerceActionCommitmentSchema,
+  type CommerceActionState,
+  type CommerceActionCommitment,
   type CommerceAgentAnswer,
   type CommerceConversation,
   type CommerceConversationMessage,
@@ -72,7 +80,32 @@ interface MessageRow extends Record<string, unknown> {
   answer_json: unknown;
   run_id: string | null;
   run_status: 'running' | 'completed' | 'failed' | null;
+  run_error_code?: string | null;
+  run_error_message?: string | null;
+  report_available: boolean;
   created_at: unknown;
+}
+
+function publicRunFailure(
+  codeValue: string | null | undefined,
+  messageValue: string | null | undefined,
+): CommerceConversationMessage['runError'] {
+  const code = String(codeValue || 'COMMERCE_AGENT_FAILED')
+    .replace(/[^A-Za-z0-9_.:-]/gu, '_')
+    .slice(0, 120) || 'COMMERCE_AGENT_FAILED';
+  const diagnostic = `${code} ${String(messageValue || '')}`;
+  const message = /(?:TIMEOUT|TIMEDOUT|HEADERS_TIMEOUT)/iu.test(diagnostic)
+    ? '模型或数据查询响应超时，本次没有生成回答。'
+    : /(?:RATE_LIMIT|TOO_MANY_REQUESTS|\b429\b)/iu.test(diagnostic)
+      ? '上游服务触发限流，本次分析未完成。'
+      : /(?:DATABASE|DATA_UNAVAILABLE|ECONNREFUSED|CONNECTION|relation .* does not exist)/iu.test(diagnostic)
+        ? '经营数据服务暂时不可用，本次分析未完成。'
+        : /(?:LEASE|ABORT|CANCEL|WORKER)/iu.test(diagnostic)
+          ? '后台任务被中断或租约失效，本次分析未完成。'
+          : /(?:MODEL|PROVIDER|HTTP|UND_ERR)/iu.test(diagnostic)
+            ? '模型服务暂时不可用，本次分析未完成。'
+            : '本次分析未完成，原问题和失败记录已保留。';
+  return { code, message, retryable: true };
 }
 
 interface EvidenceRow extends Record<string, unknown> {
@@ -85,7 +118,17 @@ interface EvidenceRow extends Record<string, unknown> {
   request_json: unknown;
   row_count: unknown;
   preview_json: unknown;
+  preview_truncated: boolean;
   fetched_at: unknown;
+}
+
+interface ActionEventRow extends Record<string, unknown> {
+  message_id: string;
+  action_id: string;
+  event_type: 'confirmed' | 'started' | 'blocked' | 'resumed' | 'completed' | 'cancelled' | 'reopened';
+  version: unknown;
+  details_json: unknown;
+  created_at: unknown;
 }
 
 interface RequestRunRow extends Record<string, unknown> {
@@ -117,13 +160,51 @@ function tracesByRun(rows: EvidenceRow[]): Map<string, CommerceToolTrace[]> {
       sourceWatermark: row.source_watermark ? iso(row.source_watermark) : null,
       request: parseJson(row.request_json),
       preview: parseJson(row.preview_json),
+      previewTruncated: row.preview_truncated === true,
     };
     output.set(row.run_id, [...(output.get(row.run_id) ?? []), trace]);
   }
   return output;
 }
 
-function message(row: MessageRow, traces: Map<string, CommerceToolTrace[]>): CommerceConversationMessage {
+function actionStatesByMessage(rows: ActionEventRow[]): Map<string, CommerceActionState[]> {
+  const output = new Map<string, CommerceActionState[]>();
+  for (const row of rows) {
+    const status: CommerceActionState['status'] = row.event_type === 'confirmed'
+      ? 'confirmed'
+      : row.event_type === 'started' || row.event_type === 'resumed' || row.event_type === 'reopened'
+        ? 'in_progress'
+        : row.event_type === 'blocked'
+          ? 'blocked'
+          : row.event_type === 'cancelled'
+            ? 'cancelled'
+            : 'completed';
+    const detailsValue = parseJson(row.details_json);
+    const details = detailsValue && typeof detailsValue === 'object' && !Array.isArray(detailsValue)
+      ? detailsValue as Record<string, unknown>
+      : {};
+    const commitment = commerceActionCommitmentSchema.safeParse(details.commitment);
+    const note = typeof details.note === 'string' && details.note.trim().length > 0
+      ? details.note.trim().slice(0, 1_000)
+      : null;
+    const actionState: CommerceActionState = {
+      actionId: row.action_id,
+      status,
+      version: Number(row.version),
+      updatedAt: iso(row.created_at),
+      commitment: commitment.success ? (commitment.data as CommerceActionCommitment) : null,
+      lastNote: note,
+    };
+    output.set(row.message_id, [...(output.get(row.message_id) ?? []), actionState]);
+  }
+  return output;
+}
+
+function message(
+  row: MessageRow,
+  traces: Map<string, CommerceToolTrace[]>,
+  actionStates: Map<string, CommerceActionState[]> = new Map(),
+): CommerceConversationMessage {
   const parsedAnswer = row.answer_json === null
     ? null
     : commerceAgentAnswerSchema.safeParse(parseJson(row.answer_json));
@@ -134,13 +215,18 @@ function message(row: MessageRow, traces: Map<string, CommerceToolTrace[]>): Com
     answer: parsedAnswer && parsedAnswer.success ? parsedAnswer.data : null,
     runId: row.run_id,
     runStatus: row.run_status,
+    runError: row.run_status === 'failed'
+      ? publicRunFailure(row.run_error_code, row.run_error_message)
+      : null,
+    actionStates: actionStates.get(row.id) ?? [],
+    reportAvailable: row.report_available === true,
     traces: row.run_id ? traces.get(row.run_id) ?? [] : [],
     createdAt: iso(row.created_at),
   };
 }
 
 export type BeginTurnResult =
-  | { created: true; runId: string; userMessageId: string }
+  | { created: true; runId: string; userMessageId: string; generation: number }
   | {
       created: false;
       reason: 'existing';
@@ -164,6 +250,7 @@ export type BeginConversationTurnResult =
 export type RetryFailedTurnResult = {
   runId: string;
   conversationId: string;
+  generation: number;
 };
 
 export class CommerceIdempotencyConflictError extends Error {
@@ -188,6 +275,7 @@ export interface CompleteTurnInput {
   identity: CommerceIdentity;
   conversationId: string;
   runId: string;
+  generation: number;
   assistantMessageId: string;
   answer: CommerceAgentAnswer;
   usage: MoAgentTokenUsage;
@@ -244,16 +332,19 @@ export interface CommerceConversationStore {
     identity: CommerceIdentity;
     conversationId: string;
     runId: string;
+    generation: number;
     trace: CommerceToolTrace;
   }): Promise<void>;
   renewRunLease(input: {
     identity: CommerceIdentity;
     runId: string;
+    generation: number;
     leaseMs: number;
   }): Promise<boolean>;
   failTurn(input: {
     identity: CommerceIdentity;
     runId: string;
+    generation: number;
     code: string;
     message: string;
     usage?: MoAgentTokenUsage | null;
@@ -323,6 +414,10 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
     globalLimit: number,
     tenantLimit: number,
   ): Promise<boolean> {
+    // Capacity is deliberately cross-user/cross-tenant. Temporarily enter the explicit
+    // control-system RLS context for only these aggregate/locking queries, then restore the
+    // identity context before any tenant data mutation continues in this transaction.
+    await client.query("SELECT set_config('commerce.control_system', 'on', true)");
     await client.query(
       `SELECT pg_advisory_xact_lock(
          hashtextextended('commerce-agent:global', 72451)
@@ -335,6 +430,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
          AND lease_expires_at >= clock_timestamp()`,
     );
     if (Number(globalActive.rows[0]?.active_count ?? globalLimit) >= globalLimit) {
+      await client.query("SELECT set_config('commerce.control_system', 'off', true)");
       return false;
     }
     await client.query(
@@ -350,7 +446,9 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
          AND lease_expires_at >= clock_timestamp()`,
       [tenantId],
     );
-    return Number(active.rows[0]?.active_count ?? tenantLimit) < tenantLimit;
+    const available = Number(active.rows[0]?.active_count ?? tenantLimit) < tenantLimit;
+    await client.query("SELECT set_config('commerce.control_system', 'off', true)");
+    return available;
   }
 
   private async ownedConversation(
@@ -389,7 +487,8 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         await client.query(
           `UPDATE commerce_agent_runs
            SET status = 'failed', error_code = 'RUN_LEASE_EXPIRED',
-               error_message = 'The previous worker lease expired.', completed_at = NOW()
+               error_message = 'The previous worker lease expired.', completed_at = NOW(),
+               generation = generation + 1
            WHERE tenant_id = $1 AND user_id = $2
              AND status = 'running' AND lease_expires_at < clock_timestamp()`,
           [input.identity.tenantId, input.identity.userId],
@@ -452,9 +551,9 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         await client.query(
           `INSERT INTO commerce_agent_runs
              (id, conversation_id, tenant_id, user_id, request_id, request_sha256,
-              model, provider, status, lease_expires_at)
+              model, provider, status, lease_expires_at, lease_owner, generation)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running',
-                   clock_timestamp() + ($9::integer * INTERVAL '1 millisecond'))`,
+                   clock_timestamp() + ($9::integer * INTERVAL '1 millisecond'), $10, 1)`,
           [
             input.runId,
             conversationId,
@@ -465,6 +564,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
             input.model,
             input.provider,
             input.leaseMs,
+            `attempt_${randomUUID()}`,
           ],
         );
         await client.query(
@@ -484,6 +584,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           created: true,
           runId: input.runId,
           userMessageId,
+          generation: 1,
           conversation: summary(conversationResult.rows[0]),
         };
       });
@@ -529,7 +630,11 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           input.requestId,
           requestSha256,
         );
-        if (!existing || existing.status !== 'failed') return null;
+        // A completed run has nothing to retry. Anything else (failed, or running) is worth
+        // attempting to reclaim: the UPDATE below is the single authoritative check — for a
+        // 'running' row it only succeeds if the lease has actually expired, so a genuinely
+        // still-in-flight run is correctly left untouched and this returns null for it too.
+        if (!existing || existing.status === 'completed') return null;
         const available = await this.capacityAvailable(
           client,
           input.identity.tenantId,
@@ -537,15 +642,17 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           input.tenantConcurrencyLimit,
         );
         if (!available) throw new CommerceConversationBusyError();
-        const reclaimed = await client.query<{ id: string; conversation_id: string }>(
+        const reclaimed = await client.query<{ id: string; conversation_id: string; generation: number }>(
           `UPDATE commerce_agent_runs
            SET status = 'running', error_code = NULL, error_message = NULL,
                input_tokens = 0, output_tokens = 0, total_tokens = 0,
                started_at = NOW(), completed_at = NULL,
-               lease_expires_at = clock_timestamp() + ($1::integer * INTERVAL '1 millisecond')
+               lease_expires_at = clock_timestamp() + ($1::integer * INTERVAL '1 millisecond'),
+               lease_owner = $7, generation = generation + 1
            WHERE id = $2 AND tenant_id = $3 AND user_id = $4
-             AND request_id = $5 AND request_sha256 = $6 AND status = 'failed'
-           RETURNING id, conversation_id`,
+             AND request_id = $5 AND request_sha256 = $6
+             AND (status = 'failed' OR (status = 'running' AND lease_expires_at < clock_timestamp()))
+           RETURNING id, conversation_id, generation`,
           [
             input.leaseMs,
             existing.id,
@@ -553,6 +660,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
             input.identity.userId,
             input.requestId,
             requestSha256,
+            `attempt_${randomUUID()}`,
           ],
         );
         const row = reclaimed.rows[0];
@@ -562,7 +670,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
            WHERE run_id = $1 AND tenant_id = $2`,
           [row.id, input.identity.tenantId],
         );
-        return { runId: row.id, conversationId: row.conversation_id };
+        return { runId: row.id, conversationId: row.conversation_id, generation: row.generation };
       });
     } catch (error) {
       if (postgresConstraint(error) === 'commerce_agent_one_active_user_turn_idx') {
@@ -597,10 +705,20 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
     if (!conversation) return null;
     const boundedLimit = Math.max(2, Math.min(200, historyLimit));
     const messagesResult = await this.database.query<MessageRow>(
-      `SELECT id, role, content, answer_json, run_id, run_status, created_at
+      `SELECT id, role, content, answer_json, run_id, run_status,
+              run_error_code, run_error_message, report_available, created_at
        FROM (
          SELECT message.id, message.role, message.content, message.answer_json,
-                message.run_id, run.status AS run_status, message.created_at
+                message.run_id, run.status AS run_status,
+                run.error_code AS run_error_code, run.error_message AS run_error_message,
+                EXISTS (
+                  SELECT 1
+                  FROM commerce_agent_reports AS report
+                  WHERE report.message_id = message.id
+                    AND report.tenant_id = message.tenant_id
+                    AND report.user_id = message.user_id
+                ) AS report_available,
+                message.created_at
          FROM commerce_agent_messages AS message
          LEFT JOIN commerce_agent_runs AS run
            ON run.id = message.run_id AND run.tenant_id = message.tenant_id
@@ -615,20 +733,30 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
     const runIds = Array.from(new Set(
       messagesResult.rows.map((row) => row.run_id).filter((value): value is string => Boolean(value)),
     ));
-    const evidenceResult = runIds.length
-      ? await this.database.query<EvidenceRow>(
+    const messageIds = messagesResult.rows.map((row) => row.id);
+    const [evidenceResult, actionResult] = await Promise.all([
+      runIds.length ? this.database.query<EvidenceRow>(
           `SELECT id, run_id, operation, request_sha256, response_sha256, source_watermark, request_json,
-                  row_count, preview_json, fetched_at
+                  row_count, preview_json, preview_truncated, fetched_at
            FROM commerce_agent_evidence
            WHERE tenant_id = $1 AND run_id = ANY($2::text[])
            ORDER BY created_at ASC`,
           [identity.tenantId, runIds],
-        )
-      : { rows: [], rowCount: 0 };
+        ) : Promise.resolve({ rows: [], rowCount: 0 }),
+      messageIds.length ? this.database.query<ActionEventRow>(
+        `SELECT DISTINCT ON (message_id, action_id)
+                message_id, action_id, event_type, version, details_json, created_at
+         FROM commerce_agent_action_events
+         WHERE tenant_id = $1 AND user_id = $2 AND message_id = ANY($3::text[])
+         ORDER BY message_id, action_id, version DESC`,
+        [identity.tenantId, identity.userId, messageIds],
+      ) : Promise.resolve({ rows: [], rowCount: 0 }),
+    ]);
     const traces = tracesByRun(evidenceResult.rows);
+    const actionStates = actionStatesByMessage(actionResult.rows);
     return {
       ...summary(conversation),
-      messages: messagesResult.rows.map((row) => message(row, traces)),
+      messages: messagesResult.rows.map((row) => message(row, traces, actionStates)),
     };
   }
 
@@ -662,7 +790,9 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
          LIMIT $4
        )
        SELECT message.id, message.role, message.content, message.answer_json,
-              message.run_id, 'completed'::text AS run_status, message.created_at
+              message.run_id, 'completed'::text AS run_status,
+              NULL::text AS run_error_code, NULL::text AS run_error_message,
+              false AS report_available, message.created_at
        FROM recent_completed_runs AS recent
        JOIN commerce_agent_messages AS message
          ON message.run_id = recent.id
@@ -705,7 +835,8 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         await client.query(
           `UPDATE commerce_agent_runs
            SET status = 'failed', error_code = 'RUN_LEASE_EXPIRED',
-               error_message = 'The previous worker lease expired.', completed_at = NOW()
+               error_message = 'The previous worker lease expired.', completed_at = NOW(),
+               generation = generation + 1
            WHERE tenant_id = $1 AND user_id = $2
              AND status = 'running' AND lease_expires_at < clock_timestamp()`,
           [input.identity.tenantId, input.identity.userId],
@@ -756,9 +887,9 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO commerce_agent_runs
              (id, conversation_id, tenant_id, user_id, request_id, request_sha256,
-              model, provider, status, lease_expires_at)
+              model, provider, status, lease_expires_at, lease_owner, generation)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running',
-                   clock_timestamp() + ($9::integer * INTERVAL '1 millisecond'))
+                   clock_timestamp() + ($9::integer * INTERVAL '1 millisecond'), $10, 1)
            ON CONFLICT (tenant_id, user_id, request_id) DO NOTHING
            RETURNING id`,
           [
@@ -771,6 +902,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
             input.model,
             input.provider,
             input.leaseMs,
+            `attempt_${randomUUID()}`,
           ],
         );
         if (!inserted.rowCount) {
@@ -807,7 +939,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
            WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
           [input.conversationId, input.identity.tenantId, input.identity.userId],
         );
-        return { created: true, runId, userMessageId };
+        return { created: true, runId, userMessageId, generation: 1 };
       });
     } catch (error) {
       if (
@@ -822,13 +954,21 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
 
   async completeTurn(input: CompleteTurnInput): Promise<void> {
     await this.database.transaction(async (client) => {
-      const run = await client.query<{ id: string }>(
+      const run = await client.query<{
+        id: string;
+        request_id: string;
+        request_sha256: string;
+        model: string;
+        provider: string;
+        started_at: unknown;
+        completed_at: unknown;
+      }>(
         `UPDATE commerce_agent_runs
          SET status = 'completed', input_tokens = $1, output_tokens = $2,
              total_tokens = $3, completed_at = NOW()
          WHERE id = $4 AND tenant_id = $5 AND user_id = $6 AND status = 'running'
-           AND lease_expires_at >= clock_timestamp()
-         RETURNING id`,
+           AND lease_expires_at >= clock_timestamp() AND generation = $7
+         RETURNING id, request_id, request_sha256, model, provider, started_at, completed_at`,
         [
           input.usage.inputTokens,
           input.usage.outputTokens,
@@ -836,13 +976,37 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           input.runId,
           input.identity.tenantId,
           input.identity.userId,
+          input.generation,
         ],
       );
-      if (!run.rowCount) throw new Error('Commerce run was not active or did not belong to the caller.');
-      await client.query(
+      const runRow = run.rows[0];
+      if (!runRow) throw new Error('Commerce run was not active or did not belong to the caller.');
+      const source = await client.query<{
+        title: string;
+        question_id: string;
+        question_content: string;
+        question_created_at: unknown;
+      }>(
+        `SELECT conversation.title, question.id AS question_id,
+                question.content AS question_content,
+                question.created_at AS question_created_at
+         FROM commerce_agent_conversations AS conversation
+         JOIN commerce_agent_messages AS question
+           ON question.conversation_id = conversation.id
+          AND question.tenant_id = conversation.tenant_id
+          AND question.user_id = conversation.user_id
+          AND question.run_id = $2 AND question.role = 'user'
+         WHERE conversation.id = $1 AND conversation.tenant_id = $3
+           AND conversation.user_id = $4`,
+        [input.conversationId, input.runId, input.identity.tenantId, input.identity.userId],
+      );
+      const sourceRow = source.rows[0];
+      if (!sourceRow) throw new Error('Commerce report source message was not found.');
+      const assistant = await client.query<{ created_at: unknown }>(
         `INSERT INTO commerce_agent_messages
            (id, conversation_id, tenant_id, user_id, role, content, answer_json, run_id)
-         VALUES ($1, $2, $3, $4, 'assistant', $5, $6::jsonb, $7)`,
+         VALUES ($1, $2, $3, $4, 'assistant', $5, $6::jsonb, $7)
+         RETURNING created_at`,
         [
           input.assistantMessageId,
           input.conversationId,
@@ -853,12 +1017,15 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           input.runId,
         ],
       );
+      if (!assistant.rows[0]) throw new Error('Commerce assistant message was not persisted.');
       for (const trace of input.traces) {
         await client.query(
           `INSERT INTO commerce_agent_evidence
              (id, run_id, conversation_id, tenant_id, operation, request_sha256,
-              response_sha256, source_watermark, request_json, row_count, preview_json, fetched_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10, $11::jsonb, $12::timestamptz)
+              response_sha256, source_watermark, request_json, row_count, preview_json,
+              preview_truncated, fetched_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10,
+                   $11::jsonb, $12, $13::timestamptz)
            ON CONFLICT (id) DO NOTHING`,
           [
             trace.evidenceId,
@@ -872,10 +1039,44 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
             JSON.stringify(trace.request),
             trace.rowCount,
             JSON.stringify(trace.preview),
+            trace.previewTruncated === true,
             trace.fetchedAt,
           ],
         );
       }
+      const completedAt = iso(runRow.completed_at);
+      const report = buildReportArtifact({
+        reportId: newCommerceReportId(),
+        releaseRevision: process.env.COMMERCE_RELEASE_REVISION || 'unversioned',
+        createdAt: completedAt,
+        identity: input.identity,
+        conversation: { id: input.conversationId, title: sourceRow.title },
+        run: {
+          id: input.runId,
+          requestId: runRow.request_id,
+          requestSha256: runRow.request_sha256,
+          model: runRow.model,
+          provider: runRow.provider,
+          startedAt: iso(runRow.started_at),
+          completedAt,
+        },
+        question: {
+          messageId: sourceRow.question_id,
+          content: sourceRow.question_content,
+          createdAt: iso(sourceRow.question_created_at),
+        },
+        answer: {
+          messageId: input.assistantMessageId,
+          content: input.answer.answer,
+          structured: input.answer,
+          createdAt: iso(assistant.rows[0].created_at),
+        },
+        traces: input.traces.map((trace) => ({
+          ...trace,
+          previewTruncated: trace.previewTruncated !== false,
+        })),
+      });
+      await insertReportArtifact(client, report);
       await client.query(
         `UPDATE commerce_agent_conversations
          SET updated_at = NOW()
@@ -889,18 +1090,21 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
     identity: CommerceIdentity;
     conversationId: string;
     runId: string;
+    generation: number;
     trace: CommerceToolTrace;
   }): Promise<void> {
     const trace = input.trace;
     const inserted = await this.database.query<{ id: string }>(
       `INSERT INTO commerce_agent_evidence
          (id, run_id, conversation_id, tenant_id, operation, request_sha256,
-          response_sha256, source_watermark, request_json, row_count, preview_json, fetched_at)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10, $11::jsonb, $12::timestamptz
+          response_sha256, source_watermark, request_json, row_count, preview_json,
+          preview_truncated, fetched_at)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10,
+              $11::jsonb, $12, $13::timestamptz
        FROM commerce_agent_runs
        WHERE id = $2 AND conversation_id = $3 AND tenant_id = $4
-         AND user_id = $13 AND status = 'running'
-         AND lease_expires_at >= clock_timestamp()
+         AND user_id = $14 AND status = 'running'
+         AND lease_expires_at >= clock_timestamp() AND generation = $15
        ON CONFLICT (id) DO NOTHING
        RETURNING id`,
       [
@@ -915,8 +1119,10 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         JSON.stringify(trace.request),
         trace.rowCount,
         JSON.stringify(trace.preview),
+        trace.previewTruncated === true,
         trace.fetchedAt,
         input.identity.userId,
+        input.generation,
       ],
     );
     if (!inserted.rowCount) {
@@ -927,15 +1133,16 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
   async renewRunLease(input: {
     identity: CommerceIdentity;
     runId: string;
+    generation: number;
     leaseMs: number;
   }): Promise<boolean> {
     const renewed = await this.database.query<{ id: string }>(
       `UPDATE commerce_agent_runs
        SET lease_expires_at = clock_timestamp() + ($1::integer * INTERVAL '1 millisecond')
        WHERE id = $2 AND tenant_id = $3 AND user_id = $4 AND status = 'running'
-         AND lease_expires_at >= clock_timestamp()
+         AND lease_expires_at >= clock_timestamp() AND generation = $5
        RETURNING id`,
-      [input.leaseMs, input.runId, input.identity.tenantId, input.identity.userId],
+      [input.leaseMs, input.runId, input.identity.tenantId, input.identity.userId, input.generation],
     );
     return renewed.rowCount === 1;
   }
@@ -943,6 +1150,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
   async failTurn(input: {
     identity: CommerceIdentity;
     runId: string;
+    generation: number;
     code: string;
     message: string;
     usage?: MoAgentTokenUsage | null;
@@ -956,6 +1164,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
              input_tokens = $3, output_tokens = $4, total_tokens = $5,
              completed_at = NOW()
          WHERE id = $6 AND tenant_id = $7 AND user_id = $8 AND status = 'running'
+           AND generation = $9
          RETURNING conversation_id`,
         [
           input.code,
@@ -966,6 +1175,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
           input.runId,
           input.identity.tenantId,
           input.identity.userId,
+          input.generation,
         ],
       );
       const conversationId = failed.rows[0]?.conversation_id;
@@ -974,8 +1184,10 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
         await client.query(
           `INSERT INTO commerce_agent_evidence
              (id, run_id, conversation_id, tenant_id, operation, request_sha256,
-              response_sha256, source_watermark, request_json, row_count, preview_json, fetched_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10, $11::jsonb, $12::timestamptz)
+              response_sha256, source_watermark, request_json, row_count, preview_json,
+              preview_truncated, fetched_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10,
+                   $11::jsonb, $12, $13::timestamptz)
            ON CONFLICT (id) DO NOTHING`,
           [
             trace.evidenceId,
@@ -989,6 +1201,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
             JSON.stringify(trace.request),
             trace.rowCount,
             JSON.stringify(trace.preview),
+            trace.previewTruncated === true,
             trace.fetchedAt,
           ],
         );
@@ -1035,7 +1248,16 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
     const [messagesResult, evidenceResult] = await Promise.all([
       this.database.query<MessageRow>(
         `SELECT message.id, message.role, message.content, message.answer_json,
-                message.run_id, run.status AS run_status, message.created_at
+                message.run_id, run.status AS run_status,
+                run.error_code AS run_error_code, run.error_message AS run_error_message,
+                EXISTS (
+                  SELECT 1
+                  FROM commerce_agent_reports AS report
+                  WHERE report.message_id = message.id
+                    AND report.tenant_id = message.tenant_id
+                    AND report.user_id = message.user_id
+                ) AS report_available,
+                message.created_at
          FROM commerce_agent_messages AS message
          JOIN commerce_agent_runs AS run
            ON run.id = message.run_id AND run.tenant_id = message.tenant_id
@@ -1046,7 +1268,7 @@ export class PostgresCommerceConversationStore implements CommerceConversationSt
       ),
       this.database.query<EvidenceRow>(
         `SELECT id, run_id, operation, request_sha256, response_sha256, source_watermark, request_json,
-                row_count, preview_json, fetched_at
+                row_count, preview_json, preview_truncated, fetched_at
          FROM commerce_agent_evidence
          WHERE run_id = $1 AND conversation_id = $2 AND tenant_id = $3
          ORDER BY created_at ASC`,

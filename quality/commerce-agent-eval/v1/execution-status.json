@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-16T00:00:00.000Z",
+  "offlineDeterministicAssets": "implemented",
+  "offlineDeterministicTests": "locally_runnable",
+  "finalControllerCases": {
+    "status": "not_run",
+    "required": 100,
+    "completed": 0,
+    "note": "Requires the protected raw-result Controller evaluator and client-side frozen-Oracle scoring."
+  },
+  "realModelRuns": {
+    "status": "not_run",
+    "required": 120,
+    "completed": 0,
+    "note": "Requires release model credentials and must record model, parameters, prompt hash, fixture hash, tools, tokens, cost, latency, and assertions."
+  },
+  "browserEnvironmentFlows": {
+    "status": "not_run",
+    "required": 16,
+    "completed": 0
+  },
+  "feishuSandboxApprovals": {
+    "status": "not_run",
+    "required": 100,
+    "completed": 0
+  },
+  "referencePerformance": {
+    "status": "not_run",
+    "synchronousRequestsRequired": 5000,
+    "reviewEnqueueSamplesRequired": 100,
+    "completed": 0
+  },
+  "externalUserTasks": {
+    "status": "not_run",
+    "requiredUsers": 5,
+    "completedUsers": 0
+  }
+}

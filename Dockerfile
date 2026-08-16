@@ -15,6 +15,8 @@ RUN COMMERCE_STANDALONE_BUILD=1 npm run build
 FROM node:22.19.0-bookworm-slim AS runner
 WORKDIR /app
 ARG COMMERCE_RELEASE_REVISION=unversioned
+LABEL org.opencontainers.image.title="commerce-data-agent" \
+  org.opencontainers.image.revision="${COMMERCE_RELEASE_REVISION}"
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
@@ -37,6 +39,6 @@ COPY --from=builder --chown=commerce:commerce /app/migrations ./migrations
 USER commerce
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 CMD ["node", "scripts/runtime/start-commerce.js"]

@@ -9,6 +9,8 @@ const OLIST_AVAILABLE_METRICS = [
   'units',
 ];
 
+const OLIST_UNCATEGORIZED = 'Uncategorized';
+
 const OLIST_DATASET_MANIFEST = {
   revision: 'd9e49802f3e92d09ee94ab9ccc5e457f207a8959',
   repository: 'https://github.com/olist/work-at-olist-data',
@@ -36,6 +38,29 @@ const OLIST_DATASET_MANIFEST = {
         'shipping_limit_date',
         'price',
         'freight_value',
+      ],
+    },
+    products: {
+      path: 'datasets/olist_products_dataset.csv',
+      sha256: '3e6569628a17fbc75fd206ee357b59e20364b9afa90f5b6cd5b4d624c58aa9cc',
+      headers: [
+        'product_id',
+        'product_category_name',
+        'product_name_lenght',
+        'product_description_lenght',
+        'product_photos_qty',
+        'product_weight_g',
+        'product_length_cm',
+        'product_height_cm',
+        'product_width_cm',
+      ],
+    },
+    categoryTranslations: {
+      path: 'datasets/product_category_name_translation.csv',
+      sha256: 'a81f0d1f27b27e7293f761bc79e3ce8f348ee39c4b3ed3e49bde38f478586278',
+      headers: [
+        'product_category_name',
+        'product_category_name_english',
       ],
     },
     orders: {
@@ -187,6 +212,14 @@ function nonNegativeMoney(value, name, rowNumber) {
   return parsed;
 }
 
+function positiveInteger(value, name, rowNumber) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`Olist ${name} at row ${rowNumber} is invalid.`);
+  }
+  return parsed;
+}
+
 function purchaseTimestamp(value, rowNumber) {
   const normalized = requiredString(value, `Olist purchase timestamp at row ${rowNumber}`);
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/u.exec(normalized);
@@ -213,6 +246,40 @@ function purchaseTimestamp(value, rowNumber) {
 }
 
 function normalizeOlistFiles(files, source, manifest) {
+  const categoryTranslations = new Map();
+  visitCsv(
+    files.categoryTranslations,
+    manifest.files.categoryTranslations,
+    source.maxSourceRows,
+    (row, rowNumber) => {
+      const sourceCategory = requiredString(
+        row[0],
+        `Olist product category at row ${rowNumber}`,
+      );
+      if (categoryTranslations.has(sourceCategory)) {
+        throw new Error(`Olist product category is duplicated: ${sourceCategory}.`);
+      }
+      categoryTranslations.set(sourceCategory, requiredString(
+        row[1],
+        `Olist English product category at row ${rowNumber}`,
+      ));
+    },
+  );
+
+  const products = new Map();
+  visitCsv(files.products, manifest.files.products, source.maxSourceRows, (row, rowNumber) => {
+    const productId = requiredString(row[0], `Olist product_id at row ${rowNumber}`);
+    if (products.has(productId)) throw new Error(`Olist product_id is duplicated: ${productId}.`);
+    const sourceCategory = typeof row[1] === 'string' ? row[1].trim() : '';
+    const category = sourceCategory
+      ? categoryTranslations.get(sourceCategory) || `pt:${sourceCategory}`
+      : OLIST_UNCATEGORIZED;
+    if (category.length > 120) {
+      throw new Error(`Olist product category at row ${rowNumber} exceeds 120 characters.`);
+    }
+    products.set(productId, { category });
+  });
+
   const customers = new Map();
   visitCsv(files.customers, manifest.files.customers, source.maxSourceRows, (row, rowNumber) => {
     const customerId = requiredString(row[0], `Olist customer_id at row ${rowNumber}`);
@@ -223,15 +290,29 @@ function normalizeOlistFiles(files, source, manifest) {
     });
   });
 
-  const itemTotals = new Map();
+  const itemsByOrder = new Map();
+  const seenOrderItems = new Set();
   visitCsv(files.items, manifest.files.items, source.maxSourceRows, (row, rowNumber) => {
     const orderId = requiredString(row[0], `Olist item order_id at row ${rowNumber}`);
-    const current = itemTotals.get(orderId) || { gmv: 0, units: 0 };
-    current.gmv = roundMoney(
-      current.gmv + nonNegativeMoney(row[5], 'item price', rowNumber),
-    );
-    current.units += 1;
-    itemTotals.set(orderId, current);
+    const orderItemId = positiveInteger(row[1], 'order_item_id', rowNumber);
+    const orderItemKey = `${orderId}\u001f${orderItemId}`;
+    if (seenOrderItems.has(orderItemKey)) {
+      throw new Error(`Olist order item is duplicated: ${orderId}/${orderItemId}.`);
+    }
+    seenOrderItems.add(orderItemKey);
+    const productId = requiredString(row[2], `Olist item product_id at row ${rowNumber}`);
+    const product = products.get(productId);
+    if (!product) {
+      throw new Error(`Olist item product_id at row ${rowNumber} is not present in products.`);
+    }
+    const current = itemsByOrder.get(orderId) || [];
+    current.push({
+      orderItemId,
+      productId,
+      category: product.category,
+      gmv: nonNegativeMoney(row[5], 'item price', rowNumber),
+    });
+    itemsByOrder.set(orderId, current);
   });
 
   const orders = [];
@@ -255,18 +336,22 @@ function normalizeOlistFiles(files, source, manifest) {
         rejectedRows += 1;
         return;
       }
-      const totals = itemTotals.get(orderId);
-      if (!totals || totals.units < 1) {
+      const items = itemsByOrder.get(orderId);
+      if (!items || items.length < 1) {
         rejectedRows += 1;
         return;
       }
+      items.sort((left, right) => (
+        left.orderItemId - right.orderItemId
+        || left.productId.localeCompare(right.productId)
+      ));
       const purchasedAt = purchaseTimestamp(row[3], rowNumber);
       const earliestKey = `${purchasedAt}\u001f${orderId}`;
       const existingEarliest = earliestByCustomer.get(customer.uniqueId);
       if (!existingEarliest || earliestKey < existingEarliest) {
         earliestByCustomer.set(customer.uniqueId, earliestKey);
       }
-      orders.push({ orderId, customer, totals, purchasedAt, earliestKey });
+      orders.push({ orderId, customer, items, purchasedAt, earliestKey });
     },
   );
   if (rejectedRows > source.maxRejectedRows) {
@@ -278,42 +363,53 @@ function normalizeOlistFiles(files, source, manifest) {
   const aggregated = new Map();
   for (const order of orders) {
     const metricDate = order.purchasedAt.slice(0, 10);
-    const key = [metricDate, order.customer.region, source.channel].join('\u001f');
-    const current = aggregated.get(key) || {
-      metric_date: metricDate,
-      region: order.customer.region,
-      channel: source.channel,
-      sku: source.orderSku,
-      category: source.orderCategory,
-      business_timezone: source.businessTimeZone,
-      visits: 0,
-      paid_orders: 0,
-      units: 0,
-      gmv: 0,
-      refund_orders: 0,
-      refund_amount: 0,
-      cost_amount: 0,
-      ad_spend: 0,
-      new_customers: 0,
-      stockout_hours: 0,
-      ending_inventory: 0,
-      available_metrics: [...OLIST_AVAILABLE_METRICS],
-      data_mode: 'snapshot',
-      source_updated_at: source.snapshotUpdatedAt,
-    };
-    current.paid_orders += 1;
-    current.units += order.totals.units;
-    current.gmv = roundMoney(current.gmv + order.totals.gmv);
-    if (earliestByCustomer.get(order.customer.uniqueId) === order.earliestKey) {
-      current.new_customers += 1;
+    const primaryOrderItemId = order.items[0].orderItemId;
+    const isNewCustomer = earliestByCustomer.get(order.customer.uniqueId) === order.earliestKey;
+    for (const item of order.items) {
+      const key = [
+        metricDate,
+        order.customer.region,
+        source.channel,
+        item.productId,
+      ].join('\u001f');
+      const current = aggregated.get(key) || {
+        metric_date: metricDate,
+        region: order.customer.region,
+        channel: source.channel,
+        sku: item.productId,
+        category: item.category,
+        business_timezone: source.businessTimeZone,
+        visits: 0,
+        paid_orders: 0,
+        units: 0,
+        gmv: 0,
+        refund_orders: 0,
+        refund_amount: 0,
+        cost_amount: 0,
+        ad_spend: 0,
+        new_customers: 0,
+        stockout_hours: 0,
+        ending_inventory: 0,
+        available_metrics: [...OLIST_AVAILABLE_METRICS],
+        data_mode: 'snapshot',
+        currency_code: 'BRL',
+        source_updated_at: source.snapshotUpdatedAt,
+      };
+      current.units += 1;
+      current.gmv = roundMoney(current.gmv + item.gmv);
+      if (item.orderItemId === primaryOrderItemId) {
+        current.paid_orders += 1;
+        if (isNewCustomer) current.new_customers += 1;
+      }
+      aggregated.set(key, current);
     }
-    aggregated.set(key, current);
   }
 
   return {
     records: [...aggregated.values()].sort((left, right) => (
       left.metric_date.localeCompare(right.metric_date)
       || left.region.localeCompare(right.region)
+      || left.sku.localeCompare(right.sku)
     )),
     sourceRows,
     rejectedRows,
@@ -436,6 +532,8 @@ function olistSourceConfig(config, manifest) {
       config.snapshotUpdatedAt || '2018-10-17T20:30:18.000Z',
       'source.snapshotUpdatedAt',
     ),
+    coverageStart: requiredString(config.coverageStart || '2016-09-04', 'source.coverageStart', /^\d{4}-\d{2}-\d{2}$/u),
+    coverageEnd: requiredString(config.coverageEnd || '2018-09-03', 'source.coverageEnd', /^\d{4}-\d{2}-\d{2}$/u),
     maxRetries: boundedInteger(config.maxRetries, 'source.maxRetries', 4, 0, 8),
     maxRetryDelayMs: boundedInteger(
       config.maxRetryDelayMs,
@@ -459,19 +557,21 @@ function olistSourceConfig(config, manifest) {
       10_000,
     ),
     channel: requiredString(config.channel || 'Olist Marketplace', 'source.channel'),
-    orderSku: requiredString(config.orderSku || 'OLIST-ORDER', 'source.orderSku'),
-    orderCategory: requiredString(
-      config.orderCategory || 'All Products',
-      'source.orderCategory',
-    ),
   };
 }
 
 async function loadOlistPublicSource(config, checkpoint, limits, dependencies = {}) {
   const manifest = dependencies.manifest || OLIST_DATASET_MANIFEST;
   const source = olistSourceConfig(config, manifest);
-  const checkpointAfter = `olist:${source.revision}`;
+  if (
+    !Number.isFinite(Date.parse(`${source.coverageStart}T00:00:00.000Z`))
+    || !Number.isFinite(Date.parse(`${source.coverageEnd}T00:00:00.000Z`))
+    || source.coverageStart > source.coverageEnd
+  ) {
+    throw new Error('Olist coverageStart/coverageEnd must be a valid ordered date range.');
+  }
   const sourceSha256 = manifestSha256(manifest);
+  const checkpointAfter = `olist:${source.revision}:${sourceSha256}`;
   if (dependencies.allowUnchanged === true && checkpoint === checkpointAfter) {
     return {
       body: '',
@@ -480,6 +580,12 @@ async function loadOlistPublicSource(config, checkpoint, limits, dependencies = 
       transport: 'olist',
       sourceRows: 0,
       sourceSha256,
+      coverageProof: {
+        kind: 'complete_snapshot',
+        coverageStart: source.coverageStart,
+        coverageEnd: source.coverageEnd,
+        sourceUpdatedAt: source.snapshotUpdatedAt,
+      },
       unchanged: true,
     };
   }
@@ -496,7 +602,13 @@ async function loadOlistPublicSource(config, checkpoint, limits, dependencies = 
   const files = {};
   let totalBytes = 0;
   try {
-    for (const name of ['customers', 'items', 'orders']) {
+    for (const name of [
+      'customers',
+      'products',
+      'categoryTranslations',
+      'items',
+      'orders',
+    ]) {
       const file = manifest.files[name];
       requiredString(file.sha256, `${name}.sha256`, /^[a-f0-9]{64}$/u);
       let result = cacheDirectory
@@ -540,6 +652,12 @@ async function loadOlistPublicSource(config, checkpoint, limits, dependencies = 
     sourceRows: normalized.sourceRows,
     rejectedRows: normalized.rejectedRows,
     sourceSha256,
+    coverageProof: {
+      kind: 'complete_snapshot',
+      coverageStart: source.coverageStart,
+      coverageEnd: source.coverageEnd,
+      sourceUpdatedAt: source.snapshotUpdatedAt,
+    },
   };
 }
 

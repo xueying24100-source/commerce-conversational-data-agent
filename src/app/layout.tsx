@@ -1,6 +1,9 @@
 import './globals.css'
 import type { Metadata } from 'next'
+import { Inter } from 'next/font/google'
 import { ThemeProvider } from '@/contexts/ThemeContext'
+
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' })
 
 export const dynamic = 'force-dynamic'
 
@@ -28,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
       </head>
-      <body className="min-h-screen bg-background text-foreground">
+      <body className={`${inter.variable} min-h-screen bg-background font-sans text-foreground`}>
         <ThemeProvider>
           {children}
         </ThemeProvider>

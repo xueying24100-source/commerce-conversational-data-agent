@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "commerce-data-contract/v1",
+  "artifacts": [
+    {
+      "id": "olist-base-daily-totals-v1",
+      "path": "sources/olist-base-daily-totals-v1.json",
+      "sha256": "sha256:1c617100b83a28da6f576002c3347ddce1d431d97406d652bd0111d478729262"
+    },
+    {
+      "id": "olist-same-source-derived-v1",
+      "path": "fixtures/olist-same-source-derived-v1.json",
+      "seed": 20260816,
+      "sha256": "sha256:448546cc941c7fea7c802c61dfa088e1958c3b5f95bfd95f00989dd75a4c5df7",
+      "disclosure": "Visits and drill-down dimensions are deterministic public-data-derived demonstration fields."
+    },
+    {
+      "id": "controlled-compatible-v1",
+      "path": "fixtures/controlled-compatible-v1.json",
+      "seed": 90421,
+      "sha256": "sha256:8ef7b555a56432d08f7640354d794eb474e819347a535ff957e6eff2178417d3",
+      "disclosure": "Entirely controlled deterministic fixture; not a real merchant."
+    }
+  ]
+}

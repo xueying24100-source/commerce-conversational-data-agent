@@ -14,7 +14,7 @@ describe('Commerce structured telemetry', () => {
 
     logCommerceFailure(
       'commerce.test.failed',
-      new Error('postgresql://user:password@db.internal:5432/app sk-supersecretmaterial123'),
+      new Error('postgresql://user:password@db.internal:5432/app secret-fixture-supersecretmaterial123'),
       { conversationId: 'conv_test' },
     );
 

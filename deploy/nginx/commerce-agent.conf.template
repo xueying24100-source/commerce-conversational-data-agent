@@ -53,7 +53,10 @@ server {
     proxy_set_header x-commerce-proxy-secret "${COMMERCE_TRUSTED_PROXY_SECRET}";
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # Overwrite, rather than append to, caller-supplied network headers. The app uses
+    # X-Real-IP as the sole anti-abuse address and therefore sees only this trusted value.
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
 
     proxy_connect_timeout 10s;
     proxy_read_timeout 120s;

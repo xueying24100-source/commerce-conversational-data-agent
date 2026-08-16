@@ -1,6 +1,15 @@
 import type { CommerceSqlClient } from './database';
 import { getCommerceAgentRuntimeConfig } from './config';
 import {
+  evaluateCommerceDataHealth,
+  previousComparableRanges,
+  selectCommerceBaseline,
+  scanCommerceKpis,
+  type CommerceBaselineDecision,
+  type CommerceDataHealthReport,
+  type CommerceKpiScan,
+} from './diagnostics';
+import {
   COMMERCE_DIMENSIONS,
   COMMERCE_METRICS,
   type CommerceCatalog,
@@ -11,9 +20,53 @@ import {
   type CommerceMetricDefinition,
 } from './types';
 
-interface MetricSpec extends CommerceMetricDefinition {
+interface MetricSpec extends Omit<
+  CommerceMetricDefinition,
+  'aggregation' | 'additivity' | 'additiveDimensions'
+> {
   sql: string;
 }
+
+type MetricAggregationSpec = Pick<
+CommerceMetricDefinition,
+'aggregation' | 'additivity' | 'additiveDimensions'
+>;
+
+const ALL_DIMENSIONS = [...COMMERCE_DIMENSIONS];
+const METRIC_AGGREGATION_SPECS: Record<CommerceMetric, MetricAggregationSpec> = {
+  gmv: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  net_revenue: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  paid_orders: {
+    aggregation: 'sum',
+    additivity: 'source_allocated_additive',
+    additiveDimensions: ALL_DIMENSIONS,
+  },
+  units: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  visits: {
+    aggregation: 'sum',
+    additivity: 'source_allocated_additive',
+    additiveDimensions: ALL_DIMENSIONS,
+  },
+  conversion_rate: { aggregation: 'ratio_of_sums', additivity: 'non_additive', additiveDimensions: [] },
+  average_order_value: { aggregation: 'ratio_of_sums', additivity: 'non_additive', additiveDimensions: [] },
+  refund_rate: { aggregation: 'ratio_of_sums', additivity: 'non_additive', additiveDimensions: [] },
+  refund_amount: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  gross_profit: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  gross_margin: { aggregation: 'ratio_of_sums', additivity: 'non_additive', additiveDimensions: [] },
+  ad_spend: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  roas: { aggregation: 'ratio_of_sums', additivity: 'non_additive', additiveDimensions: [] },
+  new_customers: {
+    aggregation: 'sum',
+    additivity: 'source_allocated_additive',
+    additiveDimensions: ALL_DIMENSIONS,
+  },
+  stockout_hours: { aggregation: 'sum', additivity: 'additive', additiveDimensions: ALL_DIMENSIONS },
+  ending_inventory: {
+    aggregation: 'average_daily_total',
+    additivity: 'semi_additive_time',
+    additiveDimensions: ALL_DIMENSIONS,
+  },
+};
 
 const METRIC_REQUIREMENTS: Record<CommerceMetric, string[]> = {
   gmv: ['gmv'],
@@ -43,6 +96,17 @@ export class CommerceMetricUnavailableError extends Error {
   }
 }
 
+export class CommerceDataRangeIncompleteError extends Error {
+  readonly code = 'COMMERCE_DATA_RANGE_INCOMPLETE';
+
+  constructor(readonly missingDates: string[]) {
+    const preview = missingDates.slice(0, 10).join(', ');
+    const remainder = missingDates.length > 10 ? ` 等 ${missingDates.length} 天` : '';
+    super(`查询日期范围的数据完整性尚未验证：${preview}${remainder}。`);
+    this.name = 'CommerceDataRangeIncompleteError';
+  }
+}
+
 const METRIC_SPECS: Record<CommerceMetric, MetricSpec> = {
   gmv: {
     id: 'gmv', label: 'GMV', format: 'currency', description: '支付订单成交金额。',
@@ -53,7 +117,7 @@ const METRIC_SPECS: Record<CommerceMetric, MetricSpec> = {
     sql: 'SUM(gmv - refund_amount)::double precision',
   },
   paid_orders: {
-    id: 'paid_orders', label: '支付订单', format: 'integer', description: '支付成功订单数。',
+    id: 'paid_orders', label: '支付订单', format: 'integer', description: '支付成功订单数；每笔订单必须由 Connector 唯一分配到一个事实桶。',
     sql: 'SUM(paid_orders)::double precision',
   },
   units: {
@@ -97,15 +161,15 @@ const METRIC_SPECS: Record<CommerceMetric, MetricSpec> = {
     sql: 'CASE WHEN SUM(ad_spend) = 0 THEN NULL ELSE SUM(gmv)::double precision / SUM(ad_spend) END',
   },
   new_customers: {
-    id: 'new_customers', label: '新客数', format: 'integer', description: '完成首购的客户数。',
+    id: 'new_customers', label: '新客数', format: 'integer', description: '完成首购的客户数；每位客户必须由 Connector 唯一分配到首次购买事实桶。',
     sql: 'SUM(new_customers)::double precision',
   },
   stockout_hours: {
-    id: 'stockout_hours', label: '缺货时长', format: 'hours', description: '商品缺货小时数。',
+    id: 'stockout_hours', label: '缺货时长', format: 'hours', description: 'SKU-hours；跨商品汇总表示商品缺货小时之和，不是自然时钟小时。',
     sql: 'SUM(stockout_hours)::double precision',
   },
   ending_inventory: {
-    id: 'ending_inventory', label: '平均期末库存', format: 'decimal', description: '查询范围内日末库存均值。',
+    id: 'ending_inventory', label: '平均期末库存', format: 'decimal', description: '查询范围内先汇总每日期末库存，再计算日均值。',
     sql: 'AVG(ending_inventory)::double precision',
   },
 };
@@ -277,6 +341,27 @@ export interface EntityLookupRequest {
   limit: number;
 }
 
+export interface DataHealthRequest {
+  range: CommerceDateRange;
+  requiredMetrics: CommerceMetric[];
+  requiredDimensions: CommerceDimension[];
+  requireProductDimension: boolean;
+  optionalMetrics: CommerceMetric[];
+  now?: Date;
+}
+
+export interface WeeklyKpiScanRequest {
+  current: CommerceDateRange;
+  metrics: CommerceMetric[];
+  filters: CommerceFilters;
+  baseline?: CommerceBaselineDecision;
+}
+
+export interface CommerceEntityMention {
+  dimension: CommerceDimension;
+  value: string;
+}
+
 export interface EntityLookupRow {
   value: string;
   factRows: number;
@@ -284,6 +369,9 @@ export interface EntityLookupRow {
 
 export interface CommerceAnalyticsRepository {
   getCatalog(tenantId: string): Promise<CommerceCatalog>;
+  inspectDataHealth?(tenantId: string, request: DataHealthRequest): Promise<CommerceDataHealthReport>;
+  scanWeeklyKpis?(tenantId: string, request: WeeklyKpiScanRequest): Promise<CommerceKpiScan>;
+  findMentionedEntities(tenantId: string, question: string): Promise<CommerceEntityMention[]>;
   lookupEntities(tenantId: string, request: EntityLookupRequest): Promise<EntityLookupRow[]>;
   compareMetrics(tenantId: string, request: MetricComparisonRequest): Promise<MetricComparisonResult>;
   breakdown(tenantId: string, request: BreakdownRequest): Promise<BreakdownRow[]>;
@@ -313,6 +401,48 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
     if (unavailable.length) throw new CommerceMetricUnavailableError(unavailable);
   }
 
+  private async assertRangesComplete(
+    tenantId: string,
+    ranges: CommerceDateRange[],
+  ): Promise<void> {
+    const values: unknown[] = [tenantId];
+    const requestedRanges = ranges.map((range) => {
+      const start = values.push(range.start);
+      const end = values.push(range.end);
+      return `($${start}::date, $${end}::date)`;
+    });
+    const result = await this.database.query<{ missing_dates: unknown }>(
+      `WITH requested_ranges(start_date, end_date) AS (
+         VALUES ${requestedRanges.join(', ')}
+       ), required_dates AS (
+         SELECT DISTINCT calendar.partition_date::date AS partition_date
+         FROM requested_ranges
+         CROSS JOIN LATERAL generate_series(
+           requested_ranges.start_date,
+           requested_ranges.end_date,
+           INTERVAL '1 day'
+         ) AS calendar(partition_date)
+       )
+       SELECT COALESCE(
+                ARRAY_AGG(required_dates.partition_date::text ORDER BY required_dates.partition_date)
+                  FILTER (
+                    WHERE partitions.partition_date IS NULL
+                       OR partitions.completeness_state <> 'ready'
+                  ),
+                ARRAY[]::text[]
+              ) AS missing_dates
+       FROM required_dates
+       LEFT JOIN commerce_tenant_data_partitions AS partitions
+         ON partitions.tenant_id = $1
+        AND partitions.partition_date = required_dates.partition_date`,
+      values,
+    );
+    const missingDates = Array.isArray(result.rows[0]?.missing_dates)
+      ? result.rows[0].missing_dates.map(String)
+      : [];
+    if (missingDates.length) throw new CommerceDataRangeIncompleteError(missingDates);
+  }
+
   async getCatalog(tenantId: string): Promise<CommerceCatalog> {
     const previewLimit = getCommerceAgentRuntimeConfig().catalogPreviewLimit;
     const coverage = await this.database.query<{
@@ -324,6 +454,7 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
       row_count: unknown;
       available_metrics: unknown;
       business_timezone: unknown;
+      currency_code: unknown;
     }>(
       `SELECT
          coverage_start::text AS start_date,
@@ -333,7 +464,8 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
          data_mode,
          fact_row_count AS row_count,
          available_metrics,
-         business_timezone
+         business_timezone,
+         currency_code
        FROM commerce_tenant_data_status
        WHERE tenant_id = $1`,
       [tenantId],
@@ -356,6 +488,9 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
       timezone: typeof row?.business_timezone === 'string' && row.business_timezone.trim()
         ? row.business_timezone
         : 'Asia/Shanghai',
+      currencyCode: typeof row?.currency_code === 'string' && row.currency_code.trim()
+        ? row.currency_code
+        : 'CNY',
       coverage: {
         start: asIsoDate(row?.start_date),
         end: asIsoDate(row?.end_date),
@@ -369,6 +504,229 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
       ),
       dimensions,
     };
+  }
+
+  async inspectDataHealth(
+    tenantId: string,
+    request: DataHealthRequest,
+  ): Promise<CommerceDataHealthReport> {
+    const statusResult = await this.database.query<{
+      data_mode: unknown;
+      source_updated_at: unknown;
+      available_metrics: unknown;
+    }>(
+      `SELECT data_mode, source_updated_at, available_metrics
+       FROM commerce_tenant_data_status
+       WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const partitionResult = await this.database.query<{
+      partition_date: unknown;
+      completeness_state: unknown;
+      fact_row_count: unknown;
+      source_updated_at: unknown;
+      coverage_proof_kind: unknown;
+      coverage_connector_ids: unknown;
+      coverage_run_ids: unknown;
+    }>(
+      `WITH required_dates AS (
+         SELECT calendar.partition_date::date AS partition_date
+         FROM generate_series($2::date, $3::date, INTERVAL '1 day') AS calendar(partition_date)
+       )
+       SELECT required_dates.partition_date::text AS partition_date,
+              partitions.completeness_state,
+              partitions.fact_row_count,
+              partitions.source_updated_at,
+              partitions.coverage_proof_kind,
+              partitions.coverage_connector_ids,
+              partitions.coverage_run_ids
+       FROM required_dates
+       LEFT JOIN commerce_tenant_data_partitions AS partitions
+         ON partitions.tenant_id = $1
+        AND partitions.partition_date = required_dates.partition_date
+       ORDER BY required_dates.partition_date`,
+      [tenantId, request.range.start, request.range.end],
+    );
+    const dimensionResult = await this.database.query<{
+      total_rows: unknown;
+      region_rows: unknown;
+      channel_rows: unknown;
+      sku_rows: unknown;
+      category_rows: unknown;
+    }>(
+      `SELECT COUNT(*)::bigint AS total_rows,
+              COUNT(*) FILTER (
+                WHERE NULLIF(BTRIM(region), '') IS NOT NULL
+                  AND LOWER(BTRIM(region)) NOT IN ('unknown', '(not set)', 'not set', 'n/a', 'na', '未设置', '未知')
+              )::bigint AS region_rows,
+              COUNT(*) FILTER (
+                WHERE NULLIF(BTRIM(channel), '') IS NOT NULL
+                  AND LOWER(BTRIM(channel)) NOT IN ('unknown', '(not set)', 'not set', 'n/a', 'na', '未设置', '未知')
+              )::bigint AS channel_rows,
+              COUNT(*) FILTER (
+                WHERE NULLIF(BTRIM(sku), '') IS NOT NULL
+                  AND LOWER(BTRIM(sku)) NOT IN ('unknown', '(not set)', 'not set', 'n/a', 'na', '未设置', '未知')
+              )::bigint AS sku_rows,
+              COUNT(*) FILTER (
+                WHERE NULLIF(BTRIM(category), '') IS NOT NULL
+                  AND LOWER(BTRIM(category)) NOT IN ('unknown', '(not set)', 'not set', 'n/a', 'na', '未设置', '未知')
+              )::bigint AS category_rows
+       FROM commerce_daily_metrics
+       WHERE tenant_id = $1
+         AND metric_date BETWEEN $2::date AND $3::date`,
+      [tenantId, request.range.start, request.range.end],
+    );
+    const dimensionCatalogResult = await this.database.query<{ dimension: unknown }>(
+      `SELECT DISTINCT dimension
+       FROM commerce_entity_catalog
+       WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const status = statusResult.rows[0];
+    const dimensions = dimensionResult.rows[0];
+    const totalRows = asNumber(dimensions?.total_rows) ?? 0;
+    const coverage = (value: unknown) => totalRows === 0
+      ? 1
+      : Math.max(0, Math.min(1, (asNumber(value) ?? 0) / totalRows));
+    const availableMetricDefinitions = commerceMetricDefinitions(
+      Array.isArray(status?.available_metrics) ? status.available_metrics.map(String) : [],
+    );
+    const partitions = partitionResult.rows.map((row) => ({
+      date: String(row.partition_date),
+      state: row.completeness_state === 'ready'
+        ? 'ready' as const
+        : row.completeness_state === null || row.completeness_state === undefined
+          ? 'missing' as const
+          : 'incomplete' as const,
+      factRowCount: asNumber(row.fact_row_count),
+      sourceWatermark: asIsoTimestamp(row.source_updated_at),
+    }));
+    const coverageProofValid = partitionResult.rows.every((row) => (
+      row.completeness_state === 'ready'
+      && row.coverage_proof_kind === 'connector_coverage_intersection'
+      && Array.isArray(row.coverage_connector_ids)
+      && row.coverage_connector_ids.length > 0
+      && Array.isArray(row.coverage_run_ids)
+      && row.coverage_run_ids.length === row.coverage_connector_ids.length
+    ));
+    const availableDimensions = dimensionCatalogResult.rows
+      .map((row) => String(row.dimension))
+      .filter((dimension): dimension is CommerceDimension => (
+        COMMERCE_DIMENSIONS.includes(dimension as CommerceDimension)
+      ));
+    return evaluateCommerceDataHealth({
+      range: request.range,
+      availableMetrics: availableMetricDefinitions.map((metric) => metric.id),
+      availableDimensions,
+      dimensionCoverage: {
+        region: coverage(dimensions?.region_rows),
+        channel: coverage(dimensions?.channel_rows),
+        sku: coverage(dimensions?.sku_rows),
+        category: coverage(dimensions?.category_rows),
+      },
+      partitions,
+      dataMode: status?.data_mode === 'incremental' ? 'incremental' : 'snapshot',
+      sourceWatermark: asIsoTimestamp(status?.source_updated_at),
+      connectorStatus: status && coverageProofValid ? 'ready' : status ? 'degraded' : 'unknown',
+      sourceAuditPassed: coverageProofValid,
+      reconciliationConflict: false,
+      now: request.now,
+      requiredMetrics: request.requiredMetrics,
+      requiredDimensions: request.requiredDimensions,
+      requireProductDimension: request.requireProductDimension,
+      optionalMetrics: request.optionalMetrics,
+    });
+  }
+
+  async scanWeeklyKpis(
+    tenantId: string,
+    request: WeeklyKpiScanRequest,
+  ): Promise<CommerceKpiScan> {
+    await this.assertMetricsAvailable(tenantId, request.metrics);
+    await this.assertRangesComplete(tenantId, [request.current]);
+    const requestedBaseline = request.baseline
+      ?? selectCommerceBaseline({ current: request.current });
+    let baseline: CommerceBaselineDecision;
+    if (requestedBaseline.strategy === 'explicit') {
+      await this.assertRangesComplete(tenantId, requestedBaseline.comparisonRanges);
+      baseline = requestedBaseline;
+    } else {
+      const completeRanges: CommerceDateRange[] = [];
+      for (const range of requestedBaseline.comparisonRanges) {
+        try {
+          await this.assertRangesComplete(tenantId, [range]);
+          completeRanges.push(range);
+        } catch (error) {
+          if (!(error instanceof CommerceDataRangeIncompleteError)) throw error;
+        }
+      }
+      if (!completeRanges.length) {
+        // Preserve the fail-closed error shape and list the first unavailable candidate.
+        await this.assertRangesComplete(tenantId, [requestedBaseline.comparisonRanges[0]!]);
+      }
+      baseline = selectCommerceBaseline({
+        current: request.current,
+        availableRanges: completeRanges,
+      });
+    }
+    const baselineRanges = baseline.comparisonRanges;
+    const current = await this.aggregate(
+      tenantId,
+      request.current,
+      request.metrics,
+      request.filters,
+    );
+    const baselineWeeks = await Promise.all(baselineRanges.map(async (range) => ({
+      range,
+      values: await this.aggregate(tenantId, range, request.metrics, request.filters),
+    })));
+    return scanCommerceKpis({
+      currentRange: request.current,
+      current,
+      baselineWeeks,
+      baselineDecision: baseline,
+      metrics: request.metrics,
+    });
+  }
+
+  async findMentionedEntities(
+    tenantId: string,
+    question: string,
+  ): Promise<CommerceEntityMention[]> {
+    const result = await this.database.query<{
+      dimension: unknown;
+      value: unknown;
+    }>(
+      `SELECT dimension, value
+       FROM commerce_entity_catalog
+       WHERE tenant_id = $1
+         AND STRPOS(LOWER($2), LOWER(value)) > 0
+       ORDER BY LENGTH(value) DESC, fact_row_count DESC, value ASC
+       LIMIT 200`,
+      [tenantId, question],
+    );
+    const mentions = result.rows.flatMap((row): CommerceEntityMention[] => {
+      const dimension = String(row.dimension);
+      const value = String(row.value).trim();
+      if (!COMMERCE_DIMENSIONS.includes(dimension as CommerceDimension) || !value) return [];
+      const mentioned = /^[\x00-\x7F]+$/u.test(value)
+        ? new RegExp(
+            `(?<![\\p{L}\\p{N}_])${value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![\\p{L}\\p{N}_])`,
+            'iu',
+          ).test(question)
+        : question.includes(value);
+      return mentioned ? [{ dimension: dimension as CommerceDimension, value }] : [];
+    });
+    const selected: CommerceEntityMention[] = [];
+    for (const mention of mentions) {
+      if (selected.some((entry) => (
+        entry.dimension === mention.dimension
+        && entry.value !== mention.value
+        && entry.value.includes(mention.value)
+      ))) continue;
+      selected.push(mention);
+    }
+    return selected;
   }
 
   async lookupEntities(
@@ -404,11 +762,23 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
     filters: CommerceFilters,
   ): Promise<Record<CommerceMetric, number | null>> {
     const where = scopedWhere(tenantId, range, filters);
-    const columns = metrics.map((metric) => `${METRIC_SPECS[metric].sql} AS "${metric}"`);
+    const sourceColumns = Array.from(new Set([
+      ...(metrics.includes('ending_inventory') ? ['metric_date'] : []),
+      ...metrics.flatMap((metric) => METRIC_REQUIREMENTS[metric]),
+    ]));
+    const columns = metrics.map((metric) => metric === 'ending_inventory'
+      ? `(SELECT AVG(daily_value)::double precision
+          FROM (
+            SELECT metric_date, SUM(ending_inventory)::double precision AS daily_value
+            FROM scoped GROUP BY metric_date
+          ) inventory_days) AS "${metric}"`
+      : `${METRIC_SPECS[metric].sql} AS "${metric}"`);
     const result = await this.database.query<Record<string, unknown>>(
-      `SELECT ${columns.join(', ')}
-       FROM commerce_daily_metrics
-       WHERE ${where.sql}`,
+      `WITH scoped AS MATERIALIZED (
+         SELECT ${sourceColumns.join(', ')}
+         FROM commerce_daily_metrics WHERE ${where.sql}
+       )
+       SELECT ${columns.join(', ')} FROM scoped`,
       where.values,
     );
     const row = result.rows[0] ?? {};
@@ -423,6 +793,10 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
     request: MetricComparisonRequest,
   ): Promise<MetricComparisonResult> {
     await this.assertMetricsAvailable(tenantId, request.metrics);
+    await this.assertRangesComplete(tenantId, [
+      request.current,
+      ...(request.baseline ? [request.baseline] : []),
+    ]);
     const current = await this.aggregate(tenantId, request.current, request.metrics, request.filters);
     const baseline = request.baseline
       ? await this.aggregate(tenantId, request.baseline, request.metrics, request.filters)
@@ -445,6 +819,10 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
 
   async breakdown(tenantId: string, request: BreakdownRequest): Promise<BreakdownRow[]> {
     await this.assertMetricsAvailable(tenantId, [request.metric]);
+    await this.assertRangesComplete(tenantId, [
+      request.current,
+      ...(request.baseline ? [request.baseline] : []),
+    ]);
     const envelope: CommerceDateRange = request.baseline
       ? {
           start: request.current.start < request.baseline.start
@@ -460,6 +838,66 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
     const currentStart = values.push(request.current.start);
     const currentEnd = values.push(request.current.end);
     const currentPredicate = `metric_date BETWEEN $${currentStart}::date AND $${currentEnd}::date`;
+    const column = DIMENSION_COLUMNS[request.dimension];
+    if (request.metric === 'ending_inventory') {
+      let baselinePredicate: string | null = null;
+      if (request.baseline) {
+        const baselineStart = values.push(request.baseline.start);
+        const baselineEnd = values.push(request.baseline.end);
+        baselinePredicate = `metric_date BETWEEN $${baselineStart}::date AND $${baselineEnd}::date`;
+      }
+      const limitParameter = values.push(request.limit);
+      const orderBy = !request.baseline || request.sort === 'current_desc'
+        ? 'current_value DESC NULLS LAST, key ASC'
+        : request.sort === 'change_asc'
+          ? 'absolute_change ASC NULLS LAST, key ASC'
+          : 'ABS(current_value - baseline_value) DESC NULLS LAST, key ASC';
+      const result = await this.database.query<{
+        key: unknown;
+        current_value: unknown;
+        baseline_value: unknown;
+        current_present: unknown;
+        baseline_present: unknown;
+        absolute_change: unknown;
+        percent_change: unknown;
+      }>(
+        `WITH daily_inventory AS (
+           SELECT ${column}::text AS key, metric_date,
+                  SUM(ending_inventory)::double precision AS daily_value
+           FROM commerce_daily_metrics
+           WHERE ${where.sql}
+           GROUP BY ${column}, metric_date
+         ), grouped_metrics AS (
+           SELECT key,
+                  COUNT(*) FILTER (WHERE ${currentPredicate}) > 0 AS current_present,
+                  ${baselinePredicate
+                    ? `COUNT(*) FILTER (WHERE ${baselinePredicate}) > 0`
+                    : 'NULL::boolean'} AS baseline_present,
+                  AVG(daily_value) FILTER (WHERE ${currentPredicate})::double precision AS current_value,
+                  ${baselinePredicate
+                    ? `AVG(daily_value) FILTER (WHERE ${baselinePredicate})::double precision`
+                    : 'NULL::double precision'} AS baseline_value
+           FROM daily_inventory GROUP BY key
+         )
+         SELECT key, current_present, baseline_present, current_value, baseline_value,
+                CASE WHEN current_value IS NULL OR baseline_value IS NULL
+                     THEN NULL ELSE current_value - baseline_value END AS absolute_change,
+                CASE WHEN current_value IS NULL OR baseline_value IS NULL OR baseline_value = 0
+                     THEN NULL ELSE (current_value - baseline_value) / ABS(baseline_value)
+                END AS percent_change
+         FROM grouped_metrics ORDER BY ${orderBy} LIMIT $${limitParameter}`,
+        values,
+      );
+      return result.rows.map((row) => ({
+        key: String(row.key),
+        currentPresent: row.current_present === true,
+        baselinePresent: request.baseline ? row.baseline_present === true : null,
+        current: asNumber(row.current_value),
+        baseline: asNumber(row.baseline_value),
+        absoluteChange: asNumber(row.absolute_change),
+        percentChange: asNumber(row.percent_change),
+      }));
+    }
     const rawCurrentMetric = filteredMetricSql(request.metric, currentPredicate);
     const currentMetric = ZERO_WHEN_ABSENT_METRICS.has(request.metric)
       ? `COALESCE(${rawCurrentMetric}, 0::double precision)`
@@ -476,7 +914,6 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
         : rawBaselineMetric;
     }
     const limitParameter = values.push(request.limit);
-    const column = DIMENSION_COLUMNS[request.dimension];
     const orderBy = !request.baseline || request.sort === 'current_desc'
       ? 'current_value DESC NULLS LAST, key ASC'
       : request.sort === 'change_asc'
@@ -530,16 +967,27 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
 
   async trend(tenantId: string, request: TrendRequest): Promise<TrendRow[]> {
     await this.assertMetricsAvailable(tenantId, [request.metric]);
+    await this.assertRangesComplete(tenantId, [request.range]);
     const where = scopedWhere(tenantId, request.range, request.filters);
     const grain = request.grain;
+    const query = request.metric === 'ending_inventory'
+      ? `WITH daily_inventory AS (
+           SELECT date_trunc('${grain}', metric_date)::date::text AS bucket,
+                  metric_date, SUM(ending_inventory)::double precision AS daily_value
+           FROM commerce_daily_metrics WHERE ${where.sql}
+           GROUP BY 1, metric_date
+         )
+         SELECT bucket, AVG(daily_value)::double precision AS value
+         FROM daily_inventory GROUP BY bucket ORDER BY bucket ASC LIMIT 740`
+      : `SELECT date_trunc('${grain}', metric_date)::date::text AS bucket,
+                ${METRIC_SPECS[request.metric].sql} AS value
+         FROM commerce_daily_metrics
+         WHERE ${where.sql}
+         GROUP BY 1
+         ORDER BY 1 ASC
+         LIMIT 740`;
     const result = await this.database.query<{ bucket: unknown; value: unknown }>(
-      `SELECT date_trunc('${grain}', metric_date)::date::text AS bucket,
-              ${METRIC_SPECS[request.metric].sql} AS value
-       FROM commerce_daily_metrics
-       WHERE ${where.sql}
-       GROUP BY 1
-       ORDER BY 1 ASC
-       LIMIT 740`,
+      query,
       where.values,
     );
     return result.rows.map((row) => ({
@@ -553,6 +1001,7 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
     request: InventoryRiskRequest,
   ): Promise<InventoryRiskRow[]> {
     await this.assertMetricsAvailable(tenantId, ['stockout_hours', 'ending_inventory']);
+    await this.assertRangesComplete(tenantId, [request.range]);
     const where = scopedWhere(tenantId, request.range, request.filters);
     const result = await this.database.query<{
       sku: unknown;
@@ -561,14 +1010,27 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
       minimum_ending_inventory: unknown;
       last_source_update: unknown;
     }>(
-      `SELECT sku,
-              MAX(category)::text AS category,
-              SUM(stockout_hours)::double precision AS stockout_hours,
-              MIN(ending_inventory)::double precision AS minimum_ending_inventory,
-              MAX(source_updated_at) AS last_source_update
-       FROM commerce_daily_metrics
-       WHERE ${where.sql}
-       GROUP BY sku
+      `WITH daily_sku AS (
+         SELECT sku,
+                metric_date,
+                MAX(category)::text AS category,
+                SUM(stockout_hours)::double precision AS daily_stockout_hours,
+                SUM(ending_inventory)::double precision AS daily_ending_inventory,
+                MAX(source_updated_at) AS last_source_update
+         FROM commerce_daily_metrics
+         WHERE ${where.sql}
+         GROUP BY sku, metric_date
+       ), sku_risk AS (
+         SELECT sku,
+                MAX(category)::text AS category,
+                SUM(daily_stockout_hours)::double precision AS stockout_hours,
+                MIN(daily_ending_inventory)::double precision AS minimum_ending_inventory,
+                MAX(last_source_update) AS last_source_update
+         FROM daily_sku
+         GROUP BY sku
+       )
+       SELECT sku, category, stockout_hours, minimum_ending_inventory, last_source_update
+       FROM sku_risk
        ORDER BY stockout_hours DESC, minimum_ending_inventory ASC
        LIMIT $${where.values.length + 1}`,
       [...where.values, request.limit],
@@ -591,6 +1053,6 @@ export function commerceMetricDefinitions(
     !available || METRIC_REQUIREMENTS[metric].every((requirement) => available.has(requirement))
   )).map((metric) => {
     const { sql: _sql, ...definition } = METRIC_SPECS[metric];
-    return definition;
+    return { ...definition, ...METRIC_AGGREGATION_SPECS[metric] };
   });
 }

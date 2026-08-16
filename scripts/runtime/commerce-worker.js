@@ -2,6 +2,9 @@
 
 const Module = require('node:module');
 const path = require('node:path');
+
+process.env.COMMERCE_RUNTIME_ROLE ||= 'worker';
+
 const { validateProductionEnvironment } = require('./production-env');
 
 const issues = validateProductionEnvironment(process.env);

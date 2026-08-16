@@ -2,6 +2,11 @@ import { NextRequest } from 'next/server';
 import { describe, expect, it } from 'vitest';
 
 import { commerceApiError, readCommerceJson } from './api';
+import {
+  CommerceJobRateLimitError,
+  CommerceModelBudgetExceededError,
+} from './job-store';
+import { CommerceKillSwitchError } from './jobs';
 import { CommerceAgentRunError } from './runtime';
 import { CommerceRequestStateError, CommerceTurnExecutionError } from './service';
 
@@ -50,5 +55,30 @@ describe('Commerce API body boundary', () => {
   it('distinguishes a still-running idempotent request from a failed one', () => {
     expect(new CommerceRequestStateError('running').code).toBe('COMMERCE_REQUEST_RUNNING');
     expect(new CommerceRequestStateError('failed').code).toBe('COMMERCE_REQUEST_NOT_REPLAYABLE');
+  });
+
+  it('returns stable limiting responses for hourly and daily budget gates', async () => {
+    const account = commerceApiError(new CommerceJobRateLimitError('account'));
+    const budget = commerceApiError(new CommerceModelBudgetExceededError());
+
+    expect(account.status).toBe(429);
+    expect(account.headers.get('retry-after')).toBe('3600');
+    await expect(account.json()).resolves.toMatchObject({
+      error: 'COMMERCE_DIAGNOSIS_RATE_LIMITED',
+      scope: 'account',
+    });
+    expect(budget.status).toBe(429);
+    await expect(budget.json()).resolves.toMatchObject({
+      error: 'COMMERCE_DAILY_MODEL_BUDGET_EXCEEDED',
+    });
+  });
+
+  it('returns service unavailable while the global kill switch is active', async () => {
+    const response = commerceApiError(new CommerceKillSwitchError());
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'COMMERCE_GLOBAL_KILL_SWITCH',
+    });
   });
 });
