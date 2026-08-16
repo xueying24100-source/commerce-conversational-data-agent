@@ -23,6 +23,7 @@ Commands (after the package scripts are registered):
 
 ```text
 npm run check:commerce-eval-assets
+npm run eval:commerce:local-controller
 node scripts/evaluation/run-fixed-policy-ablation.js
 node scripts/evaluation/score-commerce-eval.js --manifest <manifest> --oracle <oracle> --results <results> --output <report> --enforce
 ```
@@ -33,7 +34,17 @@ Controller result set must be scored with the same manifest and Oracle before an
 comparison claim. `fixed-policy-final-report.json` is the frozen same-suite baseline for
 the executable final-100 Controller gate.
 
-`execution-status.json` deliberately records real-model 120-run, browser, Feishu sandbox, and external-user gates as `not_run`. Generating or hashing offline assets must never change those statuses to passed.
+`eval:commerce:local-controller` executes the production runtime Controller in an
+Oracle-isolated child process across all 100 final cases and 250 locked rewrites. The parent
+process loads the frozen Oracle only after raw execution completes, validates the fixture and
+revision bindings, and writes its report under `tmp/commerce-final-controller-local/`. The
+latest local run passed 100/100 complete tasks with zero safety red lines. This is reproducible
+local runtime evidence; it does not replace the protected HTTPS evaluator or real-model gate.
+
+`execution-status.json` is a frozen release-evidence baseline. Its `finalControllerCases`
+entry refers to the protected HTTPS evaluator, not the local runtime evaluator above. It also
+records real-model 120-run, browser, Feishu sandbox, and external-user gates as `not_run`.
+Generating or hashing offline assets must never change those statuses to passed.
 
 The real-model evaluator request and response are mutually bound to the checked-out
 revision, requested model/parameters, frozen manifest/Oracle/fixture hashes, and a

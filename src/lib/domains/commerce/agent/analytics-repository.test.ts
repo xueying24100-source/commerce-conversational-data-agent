@@ -513,6 +513,12 @@ describe('Postgres Commerce analytics repository', () => {
         if (text.includes('WITH requested_ranges')) {
           return { rows: [{ missing_dates: [] }] as unknown as Row[], rowCount: 1 };
         }
+        if (text.includes('GROUP BY metric_date') && text.includes('COALESCE(SUM(visits), 0) = 0')) {
+          return {
+            rows: [{ metric_date: '2026-07-08' }] as unknown as Row[],
+            rowCount: 1,
+          };
+        }
         const isCurrent = values.includes('2026-07-06');
         const baselineIndex = [
           '2026-06-29', '2026-06-22', '2026-06-15', '2026-06-08',
@@ -546,6 +552,7 @@ describe('Postgres Commerce analytics repository', () => {
       direction: 'down',
       anomalous: true,
     });
+    expect(scan.zeroActivityDates).toEqual(['2026-07-08']);
     expect(calls.filter((call) => call.text.includes('WITH scoped AS MATERIALIZED'))).toHaveLength(5);
   });
 });

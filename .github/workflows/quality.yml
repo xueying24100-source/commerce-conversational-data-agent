@@ -30,6 +30,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Oracle-isolated Controller evaluation
+        run: npm run eval:commerce:local-controller
+
       - name: Type check
         run: npm run type-check
 

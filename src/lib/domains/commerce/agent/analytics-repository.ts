@@ -3,11 +3,13 @@ import { getCommerceAgentRuntimeConfig } from './config';
 import {
   evaluateCommerceDataHealth,
   previousComparableRanges,
+  robustCommerceMetricSignal,
   selectCommerceBaseline,
   scanCommerceKpis,
   type CommerceBaselineDecision,
   type CommerceDataHealthReport,
   type CommerceKpiScan,
+  type CommerceSegmentMetricSignal,
 } from './diagnostics';
 import {
   COMMERCE_DIMENSIONS,
@@ -180,6 +182,16 @@ const DIMENSION_COLUMNS: Record<CommerceDimension, string> = {
   sku: 'sku',
   category: 'category',
 };
+
+const WEEKLY_SEGMENT_SCREEN: ReadonlyArray<{
+  metric: CommerceMetric;
+  dimension: CommerceDimension;
+}> = [
+  { metric: 'visits', dimension: 'channel' },
+  { metric: 'conversion_rate', dimension: 'channel' },
+  { metric: 'average_order_value', dimension: 'category' },
+  { metric: 'average_order_value', dimension: 'channel' },
+];
 
 function filteredMetricSql(metric: CommerceMetric, predicate: string): string {
   const filter = ` FILTER (WHERE ${predicate})`;
@@ -680,13 +692,125 @@ export class PostgresCommerceAnalyticsRepository implements CommerceAnalyticsRep
       range,
       values: await this.aggregate(tenantId, range, request.metrics, request.filters),
     })));
-    return scanCommerceKpis({
+    const segmentSignals = await this.weeklySegmentSignals(
+      tenantId,
+      [request.current, ...baselineRanges],
+      request.filters,
+    );
+    const zeroActivityDates = await this.weeklyZeroActivityDates(
+      tenantId,
+      request.current,
+      request.filters,
+    );
+    return {
+      ...scanCommerceKpis({
       currentRange: request.current,
       current,
       baselineWeeks,
       baselineDecision: baseline,
       metrics: request.metrics,
-    });
+      }),
+      segmentSignals,
+      zeroActivityDates,
+    };
+  }
+
+  private async weeklyZeroActivityDates(
+    tenantId: string,
+    range: CommerceDateRange,
+    filters: CommerceFilters,
+  ): Promise<string[]> {
+    const where = scopedWhere(tenantId, range, filters);
+    const result = await this.database.query<{ metric_date: unknown }>(
+      `SELECT metric_date::text AS metric_date
+       FROM commerce_daily_metrics
+       WHERE ${where.sql}
+       GROUP BY metric_date
+       HAVING COALESCE(SUM(visits), 0) = 0
+          AND COALESCE(SUM(paid_orders), 0) = 0
+          AND COALESCE(SUM(gmv), 0) = 0
+       ORDER BY metric_date`,
+      where.values,
+    );
+    return result.rows
+      .map((row) => String(row.metric_date ?? ''))
+      .filter((date) => /^\d{4}-\d{2}-\d{2}$/u.test(date));
+  }
+
+  private async weeklySegmentSignals(
+    tenantId: string,
+    ranges: CommerceDateRange[],
+    filters: CommerceFilters,
+  ): Promise<CommerceSegmentMetricSignal[]> {
+    const envelope = ranges.reduce((output, range) => ({
+      start: range.start < output.start ? range.start : output.start,
+      end: range.end > output.end ? range.end : output.end,
+    }), { ...ranges[0]! });
+    const series = await Promise.all(WEEKLY_SEGMENT_SCREEN.map(async ({ metric, dimension }) => {
+      const where = scopedWhere(tenantId, envelope, filters);
+      const values = [...where.values];
+      const rangeRows = ranges.map((range, index) => {
+        const rangeIndex = values.push(index);
+        const start = values.push(range.start);
+        const end = values.push(range.end);
+        return `($${rangeIndex}::integer, $${start}::date, $${end}::date)`;
+      });
+      const column = DIMENSION_COLUMNS[dimension];
+      const sourceColumns = Array.from(new Set([
+        'metric_date',
+        column,
+        ...METRIC_REQUIREMENTS[metric],
+      ]));
+      const result = await this.database.query<{
+        range_index: unknown;
+        key: unknown;
+        value: unknown;
+      }>(
+        `WITH requested_ranges(range_index, start_date, end_date) AS (
+           VALUES ${rangeRows.join(', ')}
+         ), scoped AS MATERIALIZED (
+           SELECT ${sourceColumns.join(', ')}
+           FROM commerce_daily_metrics
+           WHERE ${where.sql}
+         )
+         SELECT requested_ranges.range_index,
+                scoped.${column}::text AS key,
+                ${METRIC_SPECS[metric].sql} AS value
+         FROM requested_ranges
+         JOIN scoped
+           ON scoped.metric_date BETWEEN requested_ranges.start_date AND requested_ranges.end_date
+         GROUP BY requested_ranges.range_index, scoped.${column}
+         ORDER BY requested_ranges.range_index, key
+         LIMIT 1000`,
+        values,
+      );
+      const byKey = new Map<string, Map<number, number | null>>();
+      for (const row of result.rows) {
+        const index = Number(row.range_index);
+        const key = typeof row.key === 'string' ? row.key : String(row.key ?? '');
+        if (!Number.isInteger(index) || index < 0 || index >= ranges.length || !key) continue;
+        const valuesByRange = byKey.get(key) ?? new Map<number, number | null>();
+        valuesByRange.set(index, asNumber(row.value));
+        byKey.set(key, valuesByRange);
+      }
+      return [...byKey.entries()].map(([value, valuesByRange]) => ({
+        ...robustCommerceMetricSignal({
+          metric,
+          current: valuesByRange.get(0) ?? null,
+          history: ranges.slice(1).map((_, index) => valuesByRange.get(index + 1) ?? null),
+          minimumRelativeChange: 0.25,
+          robustZThreshold: 2.5,
+        }),
+        dimension,
+        value,
+      }));
+    }));
+    return series.flat()
+      .filter((signal) => signal.anomalous && signal.direction === 'down')
+      .sort((left, right) => Math.abs(right.relativeChange ?? 0) - Math.abs(left.relativeChange ?? 0)
+        || left.metric.localeCompare(right.metric)
+        || left.value.localeCompare(right.value))
+      .slice(0, 20);
   }
 
   async findMentionedEntities(

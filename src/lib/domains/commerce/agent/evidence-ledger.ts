@@ -2305,6 +2305,13 @@ export class CommerceEvidenceLedger {
             })
           : [],
       );
+      const stableWeeklyStop = weeklyDiagnosis
+        && diagnosticStopReason === 'no_material_anomaly'
+        && anomalousMetrics.size === 0;
+      const zeroActivityStop = weeklyDiagnosis
+        && diagnosticStopReason === 'no_material_anomaly'
+        && Array.isArray(diagnosticScan?.zeroActivityDates)
+        && diagnosticScan.zeroActivityDates.length > 0;
       const selectedFindings = weeklyDiagnosis
         ? (anomalousMetrics.size
             ? rawFindings.filter((finding) => anomalousMetrics.has(finding.metric))
@@ -2313,7 +2320,23 @@ export class CommerceEvidenceLedger {
         : rawFindings;
       const findings = weeklyGrowth?.findings ?? selectedFindings.map((finding) => ({
           ...finding,
-          detail: this.renderNarrative(finding.detail, finding.claims, 1_500),
+          ...(stableWeeklyStop ? {
+            title: `常态范围 · ${METRIC_LABELS[finding.metric]}`,
+            detail: this.renderNarrative(
+              '该指标相对稳健基准的变化未达到异常阈值，当前没有证据支持继续归因或生成行动。',
+              finding.claims,
+              1_500,
+            ),
+          } : zeroActivityStop ? {
+            title: `已观察 · ${METRIC_LABELS[finding.metric]}`,
+            detail: this.renderNarrative(
+              '当前变化与已验证完整的零活动日期同时出现，不应把日历级现象误归因给单一渠道或品类。',
+              finding.claims,
+              1_500,
+            ),
+          } : {
+            detail: this.renderNarrative(finding.detail, finding.claims, 1_500),
+          }),
           ...(weeklyDiagnosis ? {
             insightLevel: driverGatePassed
               && driverHypothesis
@@ -2370,7 +2393,13 @@ export class CommerceEvidenceLedger {
       );
       return commerceAgentAnswerSchema.parse({
         ...answer,
-        answer: weeklyGrowth
+        answer: stableWeeklyStop
+          ? this.renderNarrative(
+              '本周核心指标仍处于稳健基准的常态范围，未发现需要继续归因的异常，因此不生成经营行动。',
+              summaryClaims,
+              8_000,
+            )
+          : weeklyGrowth
           ? weeklyGrowth.narrative
           : breakdownSummary && !executive
             ? controlledSummary

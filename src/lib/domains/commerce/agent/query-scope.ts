@@ -49,8 +49,8 @@ const DIMENSION_ALIASES: Record<CommerceDimension, RegExp> = {
 
 const EXECUTIVE_QUESTION = /(?:经营情况|经营表现|经营诊断|经营复盘|整体表现|管理层|增长质量|驱动|风险|机会|建议|策略|business\s+(?:performance|health)|diagnos|drivers?|risks?|opportunit|recommend|strateg)/iu;
 const BROAD_EXECUTIVE_QUESTION = /(?:经营(?:情况|表现|诊断|复盘|风险)|整体表现|管理层|增长质量|驱动|机会|建议|策略|business\s+(?:performance|health)|diagnos|drivers?|opportunit|recommend|strateg)/iu;
-const WEEKLY_DIAGNOSTIC_OBJECTIVE = /(?:(?:诊断|分析|复盘).{0,20}(?:上一完整周|上个完整周|上周).{0,20}(?:经营|业务)?(?:表现|情况)?|(?:上一完整周|上个完整周|上周).{0,20}(?:经营|业务)(?:表现|诊断|复盘)|(?:weekly|last\s+complete\s+week).{0,20}(?:business\s+)?diagnos)/iu;
-const MUTATION_OR_SENSITIVE_REQUEST = /(?:删除(?:订单|数据|记录)|修改(?:订单|数据|记录|价格|库存)|写入|更新(?:订单|数据|记录|价格|库存)|创建(?:订单|退款|记录)|退款操作|执行退款|发货|下单|导出.*(?:客户|手机号|地址)|\b(?:delete|update|insert)\b|\b(?:issue|create|process|approve|execute|initiate)\s+(?:a\s+)?refund\b|\bship\s+(?:an?\s+)?(?:order|package)\b|\bplace\s+(?:an?\s+)?order\b)/iu;
+const WEEKLY_DIAGNOSTIC_OBJECTIVE = /(?:(?:诊断|分析|复盘|检查|查看|看|做一次).{0,40}(?:(?:上一|上个|前一个|最近)?完整.{0,4}周|(?:最近一个已经结束|刚结束).{0,4}周|上一自然周|上周一到周日|上周)|(?:(?:上一|上个|前一个|最近)?完整.{0,4}周|(?:最近一个已经结束|刚结束).{0,4}周|上一自然周|上周一到周日|上周).{0,40}(?:经营|业务|GMV|核心指标|表现|诊断|复盘|异常|变化|基准)|(?:weekly|last\s+complete\s+week).{0,20}(?:business\s+)?diagnos)/iu;
+const MUTATION_OR_SENSITIVE_REQUEST = /(?:删除(?:订单|数据|记录)|修改(?:订单|数据|记录|价格|库存)|写入|更新(?:订单|数据|记录|价格|库存)|创建(?:订单|退款|记录)|退款操作|执行退款|发货|下单|导出.*(?:客户|手机号|地址)|(?:忽略|绕过|跳过).{0,20}(?:租户|权限|数据健康|健康检查|门禁)|(?:其他|别的).{0,8}(?:店铺|商家|租户)|(?:任意|直接执行).{0,8}\bSQL\b|(?:系统提示|system\s*prompt|数据库连接串|database\s*(?:url|connection|string)|密钥|secret).{0,20}(?:发给|给我|输出|泄露|显示)|(?:不经|未经|无需).{0,12}(?:批准|审批|确认).{0,12}(?:发送|通知|飞书)|(?:直接|重复).{0,12}(?:发送|通知|飞书)|(?:伪造|编造|捏造).{0,12}(?:促销|活动|业务事件|business\s*event)|(?:即使|哪怕).{0,20}(?:缺失|没有|不可用).{0,20}(?:声称|下结论|断言)|(?:描述|声称|伪装).{0,12}(?:实时店铺|实时商家|live\s*merchant)|(?:\btenant[_\s-]?id\b.{0,20}(?:改|change|override)|(?:改|change|override).{0,20}\btenant[_\s-]?id\b)|\b(?:delete|update|insert)\b|\b(?:issue|create|process|approve|execute|initiate)\s+(?:a\s+)?refund\b|\bship\s+(?:an?\s+)?(?:order|package)\b|\bplace\s+(?:an?\s+)?order\b)/iu;
 const COMPARISON_REQUEST = /(?:同比|环比|去年同期|上年同期|较上月|相比上月|对比上月|对比|相比|比较|对照|\byoy\b|year[\s-]*over[\s-]*year|\bmom\b|month[\s-]*over[\s-]*month|\bvs\.?\b|versus)/iu;
 const YEAR_OVER_YEAR_REQUEST = /(?:同比|去年同期|上年同期|\byoy\b|year[\s-]*over[\s-]*year)/iu;
 const MONTH_OVER_MONTH_REQUEST = /(?:环比|较上月|相比上月|对比上月|\bmom\b|month[\s-]*over[\s-]*month|(?:\bvs\.?\b|versus).*last\s+month)/iu;
@@ -531,18 +531,14 @@ export function resolveCommerceQueryScope(input: {
     && (!inventory || BROAD_EXECUTIVE_QUESTION.test(resolutionQuestion));
   const explicitRanges = extractExplicitRanges(resolutionQuestion).ranges;
   const mode = comparisonMode(resolutionQuestion, explicitRanges.length);
-  const relativeRange = explicitRanges.length
+  const relativeRange = explicitRanges.length || weeklyDiagnosis
     ? null
     : extractRelativeRange(resolutionQuestion, referenceDate, input.catalog.coverage.end);
   const ambiguousRanges = explicitRanges.length > 1 && mode === null;
   const current = explicitRanges[0]
     ?? relativeRange
     ?? (weeklyDiagnosis
-      ? previousCompleteWeekRange(
-          input.catalog.coverage.end && input.catalog.coverage.end < referenceDate
-            ? input.catalog.coverage.end
-            : referenceDate,
-        )
+      ? previousCompleteWeekRange(referenceDate)
       : null);
   let baseline = mode && explicitRanges[1] ? explicitRanges[1] : null;
   if (current && !baseline) {
@@ -568,7 +564,7 @@ export function resolveCommerceQueryScope(input: {
 
   const missingSlots: CommerceQueryScopeMissingSlot[] = [];
   if (!current || ambiguousRanges) missingSlots.push('current_date_range');
-  if (!uniqueMetrics.length && !executive) missingSlots.push('metrics');
+  if (!uniqueMetrics.length && !executive && !weeklyDiagnosis) missingSlots.push('metrics');
   if (mode && !baseline) missingSlots.push('baseline_date_range');
   if (negatedFilters || unresolvedFilters.length) missingSlots.push('filters');
 
@@ -605,6 +601,7 @@ export function resolveCommerceQueryScope(input: {
     || reason === 'mutation_or_sensitive_request'
     || reason === 'invalid_timezone'
   ));
+  const resolvedMetrics = weeklyDiagnosis ? [] : uniqueMetrics;
   const scopeWithoutHash = {
     version: 2 as const,
     status: refusal
@@ -617,8 +614,12 @@ export function resolveCommerceQueryScope(input: {
     referenceInstant: referenceInstant.toISOString(),
     referenceDate,
     objective: weeklyDiagnosis ? 'weekly_diagnosis' as const : 'direct_query' as const,
-    metricSelection: uniqueMetrics.length ? 'explicit' as const : 'catalog_default' as const,
-    metrics: uniqueMetrics,
+    // The weekly diagnostic scan is a fixed five-KPI contract. A rewrite such as
+    // "上一完整周 GMV 为什么变化" still needs orders, visits, conversion and AOV for
+    // decomposition; treating GMV as an explicit one-metric scope makes the mandatory scan
+    // fail its own scope check and loop until max turns.
+    metricSelection: resolvedMetrics.length ? 'explicit' as const : 'catalog_default' as const,
+    metrics: resolvedMetrics,
     current: current ?? null,
     baseline,
     filters: negatedFilters ? structuredClone(EMPTY_FILTERS) : filters,

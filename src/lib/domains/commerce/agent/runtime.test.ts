@@ -186,6 +186,7 @@ function weeklyDiagnosticRepository(input: {
   coverageEnd?: string;
   virtualAsOf?: string;
   sourceUpdatedAt?: string;
+  zeroFactDate?: string;
   breakdownRows?: Array<{
     key: string;
     currentPresent: boolean;
@@ -237,7 +238,7 @@ function weeklyDiagnosticRepository(input: {
         partitions.push({
           date,
           state: 'ready' as const,
-          factRowCount: 10,
+          factRowCount: date === input.zeroFactDate ? 0 : 10,
           sourceWatermark: sourceUpdatedAt,
         });
       }
@@ -768,7 +769,53 @@ describe('conversational Commerce Agent runtime', () => {
     expect(provider.calls).toBe(0);
     expect(result.answer.status).toBe('answered');
     expect(result.answer.recommendations).toEqual([]);
+    expect(result.answer.answer).toContain('常态范围');
+    expect(result.answer.answer).toContain('不生成经营行动');
+    expect(result.answer.findings[0]).toMatchObject({
+      title: expect.stringContaining('常态范围'),
+      detail: expect.stringContaining('没有证据支持继续归因或生成行动'),
+    });
+    expect(result.answer.findings[0]?.detail).not.toContain('下一步应');
     expect(result.answer.diagnostic?.stopReason).toBe('no_material_anomaly');
+    expect(result.traces.map((trace) => trace.operation)).toEqual([
+      'commerce.describe_data',
+      'commerce.inspect_data_health',
+      'commerce.scan_weekly_kpis',
+      'commerce.diagnostic_decision',
+    ]);
+  });
+
+  it('does not misattribute a proof-backed zero-fact day to a channel driver', async () => {
+    const provider = new CommerceScriptedProvider();
+    const result = await runCommerceAgentTurn({
+      identity: {
+        tenantId: 'tenant_weekly_zero_day',
+        userId: 'user_test',
+        displayName: 'Test operator',
+        scopes: ['commerce:data:read'],
+        authMode: 'development',
+      },
+      question: '诊断上一完整周经营表现',
+      history: [],
+      repository: {
+        ...weeklyDiagnosticRepository({ zeroFactDate: '2026-07-08' }),
+        async scanWeeklyKpis(tenantId, request) {
+          const scan = await weeklyDiagnosticRepository().scanWeeklyKpis!(tenantId, request);
+          return { ...scan, zeroActivityDates: ['2026-07-08'] };
+        },
+      },
+      modelRuntime: { provider, providerName: provider.name, model: 'scripted-commerce' },
+      runId: 'commerce-agent-weekly-zero-day-test',
+      now: () => new Date('2026-07-15T12:00:00.000Z'),
+    });
+
+    expect(provider.calls).toBe(0);
+    expect(result.answer.status).toBe('answered');
+    expect(result.answer.recommendations).toEqual([]);
+    expect(result.answer.diagnostic).toMatchObject({
+      stopReason: 'no_material_anomaly',
+      driverGate: null,
+    });
     expect(result.traces.map((trace) => trace.operation)).toEqual([
       'commerce.describe_data',
       'commerce.inspect_data_health',

@@ -253,6 +253,12 @@ if (includeDocker) {
 
 const evidenceReports = {
   'browser-e2e': path.join(root, 'tmp', 'commerce-browser-e2e', 'report.json'),
+  'local-controller-eval': path.join(
+    root,
+    'tmp',
+    'commerce-final-controller-local',
+    'report.json',
+  ),
   'production-role-capabilities': roleEvidencePath,
   'restore-drill': restoreEvidencePath,
   'external-release-gates': externalEvidencePath,
@@ -273,6 +279,7 @@ const evidenceReports = {
 };
 for (const [name, artifact] of Object.entries(evidenceReports)) {
   if (name === 'browser-e2e'
+    || name === 'local-controller-eval'
     || (name === 'production-role-capabilities' && includeDocker)
     || (name === 'restore-drill' && includeDocker)
     || (name === 'external-release-gates' && includeLiveE2e && includeDocker)
@@ -288,6 +295,7 @@ const checks = [
   ['release-assets', npm, npmArgs('run', 'check:release-assets'), isolatedEnvironment],
   ['next-env-isolation', npm, npmArgs('run', 'check:next-env-isolation'), isolatedEnvironment],
   ['frozen-evaluation-assets', npm, npmArgs('run', 'check:commerce-eval-assets'), isolatedEnvironment],
+  ['local-controller-eval', npm, npmArgs('run', 'eval:commerce:local-controller'), isolatedEnvironment],
   ['production-dependency-audit', npm, npmArgs(
     'audit',
     '--omit=dev',
@@ -429,6 +437,22 @@ function bindEvidenceArtifact(checkName, record) {
     )
   ) {
     throw new Error('external-release-gates evidence is missing performance, Feishu, or usability proof.');
+  }
+  if (
+    checkName === 'local-controller-eval'
+    && (
+      artifact.caseCount !== 100
+      || artifact.runtimeTurnCount !== 350
+      || artifact.comparison?.passed !== true
+      || artifact.score?.summary?.completeTaskAccuracy?.numerator !== 100
+      || artifact.score?.summary?.completeTaskAccuracy?.denominator !== 100
+      || artifact.score?.summary?.redLines?.numerator !== 0
+      || !Array.isArray(artifact.thresholdFailures)
+      || artifact.thresholdFailures.length !== 0
+      || !/^sha256:[0-9a-f]{64}$/u.test(artifact.rawResults?.fileSha256 || '')
+    )
+  ) {
+    throw new Error('local-controller-eval must pass all frozen cases, rewrites, safety gates, and baseline comparison.');
   }
   if (
     checkName === 'final-controller-eval'

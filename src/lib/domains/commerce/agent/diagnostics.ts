@@ -147,6 +147,11 @@ export interface CommerceMetricSignal {
   direction: 'up' | 'down' | 'flat' | 'unknown';
 }
 
+export interface CommerceSegmentMetricSignal extends CommerceMetricSignal {
+  dimension: CommerceDimension;
+  value: string;
+}
+
 export interface CommerceKpiScan {
   currentRange: CommerceDateRange;
   baseline: CommerceBaselineDecision;
@@ -156,6 +161,19 @@ export interface CommerceKpiScan {
     values: Partial<Record<CommerceMetric, number | null>>;
   }>;
   signals: CommerceMetricSignal[];
+  /**
+   * Bounded robust segment screening performed inside the same read-only scan. It keeps
+   * a locally severe channel/category regression from being hidden by offsetting growth
+   * elsewhere, while the Controller still requires a second-grain investigation before
+   * promoting it to a driver.
+   */
+  segmentSignals?: CommerceSegmentMetricSignal[];
+  /**
+   * Complete business dates whose additive flagship activity is exactly zero. These dates
+   * are retained as auditable calendar context and must not be promoted to a segment driver
+   * without an independent event or outage signal.
+   */
+  zeroActivityDates?: string[];
 }
 
 export interface CommerceContributionResult {
@@ -209,6 +227,7 @@ export interface CommerceDiagnosticDecisionEvent {
     | 'scan_required'
     | 'investigate_highest_information_gain'
     | 'replan_after_contradiction'
+    | 'replan_after_unavailable_view'
     | 'stop_no_anomaly'
     | 'stop_evidence_sufficient'
     | 'stop_budget'
@@ -656,6 +675,7 @@ function signalStrength(signal: CommerceMetricSignal): number {
 
 export function rankCommerceDiagnosticHypotheses(input: {
   signals: readonly CommerceMetricSignal[];
+  segmentSignals?: readonly CommerceSegmentMetricSignal[];
   availableMetrics: readonly CommerceMetric[];
   sourceReliability: 'high' | 'low';
 }): CommerceDiagnosticHypothesis[] {
@@ -683,7 +703,13 @@ export function rankCommerceDiagnosticHypotheses(input: {
       (entry): entry is CommerceMetricSignal => Boolean(entry),
     );
     const supporting = entries.filter((entry) => entry.anomalous && definition.accepts(entry));
-    const anomalyStrength = supporting.reduce((sum, entry) => sum + signalStrength(entry), 0);
+    const segmentSupporting = (input.segmentSignals ?? []).filter((entry) => (
+      definition.metrics.includes(entry.metric)
+      && entry.anomalous
+      && definition.accepts(entry)
+    ));
+    const allSupporting = [...supporting, ...segmentSupporting];
+    const anomalyStrength = allSupporting.reduce((sum, entry) => sum + signalStrength(entry), 0);
     const missing = definition.metrics.filter((metric) => !available.has(metric));
     const impact = supporting.reduce((sum, entry) => sum + Math.abs(entry.absoluteChange ?? 0), 0);
     const score = anomalyStrength * reliability;
@@ -695,10 +721,10 @@ export function rankCommerceDiagnosticHypotheses(input: {
       reliability,
       status: missing.length === definition.metrics.length
         ? 'missing' as const
-        : supporting.length
+        : allSupporting.length
           ? 'supporting' as const
           : 'candidate' as const,
-      triggerMetrics: supporting.map((entry) => entry.metric),
+      triggerMetrics: unique(allSupporting.map((entry) => entry.metric)),
       supportingEvidenceIds: [],
       contradictingEvidenceIds: [],
       missingEvidence: missing.map((metric) => `metric:${metric}`),
@@ -749,6 +775,7 @@ function hypothesisCandidates(
       candidate('conversion_drop', 'breakdown', 'conversion_rate', 'channel', 1),
       candidate('conversion_drop', 'breakdown', 'conversion_rate', 'category', 0.86),
       candidate('conversion_drop', 'trend', 'conversion_rate', null, 0.8),
+      candidate('conversion_drop', 'breakdown', 'conversion_rate', 'region', 0.72),
     ],
     aov_or_mix: [
       candidate('aov_or_mix', 'breakdown', 'average_order_value', 'category', 1),
@@ -835,7 +862,12 @@ export function nextCommerceDiagnosticDecision(input: {
       stopReason: null,
     };
   }
-  if (!state.signals.some((signal) => signal.anomalous)) {
+  if (
+    !state.signals.some((signal) => signal.anomalous)
+    && !state.hypotheses.some((hypothesis) => (
+      hypothesis.status === 'supporting' || hypothesis.status === 'confirmed'
+    ))
+  ) {
     return {
       ...base,
       hypothesis: null,

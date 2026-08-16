@@ -8,6 +8,7 @@ npm run check:next-env-isolation
 npm run lint
 npm test
 npm run check:commerce-eval-assets
+npm run eval:commerce:local-controller
 npm run type-check
 npm run check:boundary
 npm run test:e2e:commerce:browser
@@ -15,7 +16,7 @@ npm run test:integration:commerce
 npm run build
 ```
 
-`npm run release:check:commerce` 会顺序执行上述门禁并将报告写入 `tmp/commerce-release/report.json`。`check:next-env-isolation` 使用无害探针证明 Next.js 不会把开发者被忽略的 `.env.local` 注入 release 子进程。浏览器门禁需要先按 `docs/e2e.md` 安装锁定的 Python Playwright/Chromium；其 revision-bound 报告会由主报告以 SHA-256 绑定。
+`npm run release:check:commerce` 会顺序执行上述门禁并将报告写入 `tmp/commerce-release/report.json`。本地 Controller 门禁在 Oracle 隔离的子进程中执行 100 个基础案例和 250 个锁定改写，并由主报告绑定结果哈希。`check:next-env-isolation` 使用无害探针证明 Next.js 不会把开发者被忽略的 `.env.local` 注入 release 子进程。浏览器门禁需要先按 `docs/e2e.md` 安装锁定的 Python Playwright/Chromium；其 revision-bound 报告会由主报告以 SHA-256 绑定。
 
 依赖安装可以使用组织镜像，但部分镜像不实现 npm audit API。release gate 默认使用
 `https://registry.npmjs.org` 执行审计；如组织提供兼容的可信端点，可通过

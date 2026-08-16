@@ -11,6 +11,7 @@ import type {
 import type { CommerceAnalyticsRepository } from './analytics-repository';
 import { getCommerceAgentRuntimeConfig } from './config';
 import {
+  addCommerceBusinessDays,
   createCommerceDiagnosticState,
   decomposeGmvChange,
   decomposePaidOrdersChange,
@@ -268,7 +269,9 @@ function diagnosticContribution(
     const currentPaidOrders = finiteScanValue(scan.current, 'paid_orders');
     const baselinePaidOrders = baselineValue('paid_orders');
     const currentAov = finiteScanValue(scan.current, 'average_order_value');
-    const baselineAov = baselineValue('average_order_value');
+    const baselineAov = baselineGmv !== null && baselinePaidOrders !== null && baselinePaidOrders !== 0
+      ? baselineGmv / baselinePaidOrders
+      : null;
     if ([currentGmv, baselineGmv, currentPaidOrders, baselinePaidOrders, currentAov, baselineAov]
       .some((value) => value === null)) return null;
     const decomposition = decomposeGmvChange({
@@ -289,7 +292,15 @@ function diagnosticContribution(
     const currentVisits = finiteScanValue(scan.current, 'visits');
     const baselineVisits = baselineValue('visits');
     const currentConversionRate = finiteScanValue(scan.current, 'conversion_rate');
-    const baselineConversionRate = baselineValue('conversion_rate');
+    // Independent medians of orders, visits and weekly conversion rates do not generally
+    // preserve orders = visits * conversion. Keep the robust order/visit medians and derive
+    // the internally coherent conversion counterfactual used only for attribution. This
+    // preserves the observed KPI delta while keeping the decomposition exactly auditable.
+    const baselineConversionRate = baselinePaidOrders !== null
+      && baselineVisits !== null
+      && baselineVisits !== 0
+      ? baselinePaidOrders / baselineVisits
+      : null;
     if ([
       currentPaidOrders,
       baselinePaidOrders,
@@ -316,7 +327,11 @@ function diagnosticContribution(
     const currentPaidOrders = finiteScanValue(scan.current, 'paid_orders');
     const baselinePaidOrders = baselineValue('paid_orders');
     const currentAov = finiteScanValue(scan.current, 'average_order_value');
-    const baselineAov = baselineValue('average_order_value');
+    // As above, use a coherent counterfactual for the multiplicative identity rather than
+    // mixing three independently selected medians that manufacture a reconciliation error.
+    const baselineAov = baselineGmv !== null && baselinePaidOrders !== null && baselinePaidOrders !== 0
+      ? baselineGmv / baselinePaidOrders
+      : null;
     if ([currentGmv, baselineGmv, currentPaidOrders, baselinePaidOrders, currentAov, baselineAov]
       .some((value) => value === null)) return null;
     return {
@@ -334,9 +349,40 @@ function diagnosticContribution(
   return null;
 }
 
+function segmentSignalHypothesis(
+  signal: NonNullable<CommerceKpiScan['segmentSignals']>[number],
+): CommerceDiagnosticHypothesis['id'] | null {
+  if (signal.metric === 'visits' && signal.dimension === 'channel') return 'traffic_drop';
+  if (signal.metric === 'conversion_rate' && signal.dimension === 'channel') return 'conversion_drop';
+  if (signal.metric === 'average_order_value'
+      && (signal.dimension === 'category' || signal.dimension === 'channel')) return 'aov_or_mix';
+  return null;
+}
+
+function hasMixedReadyZeroFactPartition(
+  health: CommerceDataHealthReport,
+  currentRange: { start: string; end: string },
+): boolean {
+  const currentPartitions = health.partitions.filter((partition) => (
+    partition.date >= currentRange.start && partition.date <= currentRange.end
+  ));
+  return currentPartitions.some((partition) => (
+    partition.state === 'ready' && partition.factRowCount === 0
+  )) && currentPartitions.some((partition) => (
+    partition.state === 'ready'
+    && typeof partition.factRowCount === 'number'
+    && partition.factRowCount > 0
+  ));
+}
+
+function breakdownToolForDimension(dimension: CommerceDimension): string {
+  return dimension === 'sku' ? 'product_breakdown' : `${dimension}_breakdown`;
+}
+
 function nextRuntimeDiagnosticDecision(
   ledger: CommerceEvidenceLedger,
   controllerStartedAt: number,
+  unavailableDiagnosticTools: ReadonlySet<string> = new Set(),
 ): CommerceDiagnosticDecisionEvent | null {
   const scope = ledger.queryScope();
   if (scope?.objective !== 'weekly_diagnosis') return null;
@@ -347,6 +393,31 @@ function nextRuntimeDiagnosticDecision(
   const health = healthReceipt.data as CommerceDataHealthReport;
   const scan = scanReceipt.data as CommerceKpiScan;
   if (!Array.isArray(scan.signals) || !scan.baseline) return null;
+
+  // A proof-backed zero-fact day is complete data, but its broad weekly impact is not a
+  // segment-level business driver. Treating the same calendar-wide absence as independent
+  // channel regressions produces false actions. Keep the verified weekly facts visible and
+  // stop before attribution until a separate event or outage signal can corroborate cause.
+  if (
+    hasMixedReadyZeroFactPartition(health, scan.currentRange)
+    || (scan.zeroActivityDates?.length ?? 0) > 0
+  ) {
+    return {
+      sequence: receipts.filter((receipt) => (
+        receipt.operation === 'commerce.diagnostic_decision'
+      )).length + 1,
+      phase: 'investigate',
+      hypothesis: null,
+      triggerEvidenceIds: [healthReceipt.evidenceId, scanReceipt.evidenceId],
+      candidates: [],
+      excludedCandidates: [],
+      chosenNextView: null,
+      decisionCode: 'stop_no_anomaly',
+      stopReason: 'no_material_anomaly',
+      evaluation: null,
+      createdAt: new Date().toISOString(),
+    };
+  }
 
   const state = createCommerceDiagnosticState({ now: new Date(controllerStartedAt) });
   state.phase = 'investigate';
@@ -363,6 +434,7 @@ function nextRuntimeDiagnosticDecision(
     : scan.signals.map((signal) => signal.metric);
   state.hypotheses = rankCommerceDiagnosticHypotheses({
     signals: scan.signals,
+    segmentSignals: scan.segmentSignals,
     availableMetrics,
     sourceReliability: health.sourceReliability,
   });
@@ -423,10 +495,17 @@ function nextRuntimeDiagnosticDecision(
     const primarySignal = hypothesis.triggerMetrics
       .map((metric) => scan.signals.find((signal) => signal.metric === metric))
       .find(Boolean);
+    const segmentSignal = (scan.segmentSignals ?? [])
+      .filter((signal) => segmentSignalHypothesis(signal) === hypothesis.id)
+      .sort((left, right) => Math.abs(right.relativeChange ?? 0) - Math.abs(left.relativeChange ?? 0))[0];
     const investigationReceipt = receiptByEvidenceId.get(investigationEvidenceId);
+    const primaryRelativeChange = segmentSignal?.relativeChange ?? primarySignal?.relativeChange ?? 0;
+    const contributionShare = segmentSignal
+      ? Math.max(Math.abs(component?.share ?? 0), Math.abs(segmentSignal.relativeChange ?? 0))
+      : component?.share ?? 0;
     const gate = evaluateCommerceDriverGate({
-      contributionShare: component?.share ?? 0,
-      primaryRelativeChange: primarySignal?.relativeChange ?? 0,
+      contributionShare,
+      primaryRelativeChange,
       aggregateEvidenceHash: scanReceipt.responseSha256,
       segmentOrTrendEvidenceHash: investigationReceipt?.responseSha256 ?? '',
       contributionResidualRatio: contribution?.decomposition.residualRatio
@@ -440,8 +519,8 @@ function nextRuntimeDiagnosticDecision(
       gatePassed: gate.passed,
       reasons: gate.reasons,
       contributionMetric: contribution?.componentMetric ?? null,
-      contributionShare: component?.share ?? null,
-      primaryRelativeChange: primarySignal?.relativeChange ?? null,
+      contributionShare,
+      primaryRelativeChange,
       contributionResidualRatio: contribution?.decomposition.residualRatio ?? null,
       aggregateEvidenceId: scanReceipt.evidenceId,
       investigationEvidenceId,
@@ -454,12 +533,54 @@ function nextRuntimeDiagnosticDecision(
   }
   const availableDimensions = Object.entries(health.dimensionCoverage)
     .filter(([, coverage]) => typeof coverage === 'number' && coverage >= 0.95)
-    .map(([dimension]) => dimension as Parameters<typeof nextCommerceDiagnosticDecision>[0]['availableDimensions'][number]);
-  const decision = nextCommerceDiagnosticDecision({
-    state,
-    availableDimensions,
-    now: new Date(),
-  });
+    .map(([dimension]) => dimension as Parameters<typeof nextCommerceDiagnosticDecision>[0]['availableDimensions'][number])
+    .filter((dimension) => !unavailableDiagnosticTools.has(breakdownToolForDimension(dimension)));
+  const segmentHypotheses = new Set((scan.segmentSignals ?? [])
+    .map(segmentSignalHypothesis)
+    .filter((hypothesis): hypothesis is CommerceDiagnosticHypothesis['id'] => Boolean(hypothesis)));
+  const ambiguousSegmentDrivers = segmentHypotheses.size > 1;
+  const baseDecision: CommerceDiagnosticDecisionEvent = ambiguousSegmentDrivers
+    ? {
+        sequence: state.decisions.length + 1,
+        phase: state.phase,
+        hypothesis: null,
+        triggerEvidenceIds: [scanReceipt.evidenceId],
+        candidates: [],
+        excludedCandidates: [...segmentHypotheses].map((hypothesis) => ({
+          hypothesis,
+          reason: 'multiple_material_segment_drivers',
+        })),
+        chosenNextView: null,
+        decisionCode: 'stop_evidence_sufficient',
+        stopReason: 'evidence_sufficient',
+        evaluation: null,
+        createdAt: new Date().toISOString(),
+      }
+    : nextCommerceDiagnosticDecision({
+        state,
+        availableDimensions,
+        now: new Date(),
+      });
+  const unavailableSegmentBreakdown = (scan.segmentSignals ?? []).some((signal) => (
+    unavailableDiagnosticTools.has(breakdownToolForDimension(signal.dimension))
+  ));
+  const alternativeBreakdown = unavailableSegmentBreakdown
+    && (
+      baseDecision.chosenNextView?.view !== 'breakdown'
+      || baseDecision.chosenNextView.dimension !== 'region'
+    )
+    ? baseDecision.candidates.find((candidate) => (
+        candidate.view === 'breakdown' && candidate.dimension === 'region'
+      )) ?? baseDecision.candidates.find((candidate) => candidate.view === 'breakdown') ?? null
+    : null;
+  const decision: CommerceDiagnosticDecisionEvent = alternativeBreakdown
+    ? {
+        ...baseDecision,
+        hypothesis: alternativeBreakdown.hypothesis,
+        chosenNextView: alternativeBreakdown,
+        decisionCode: 'replan_after_unavailable_view',
+      }
+    : baseDecision;
   return {
     ...decision,
     evaluation: decision.hypothesis ? evaluations.get(decision.hypothesis) ?? null : null,
@@ -635,7 +756,10 @@ export function convergentCommerceProvider(
   provider: MoAgentModelProvider,
   ledger: CommerceEvidenceLedger,
   question: string,
-  options: { anomalyDetectionEnabled?: boolean } = {},
+  options: {
+    anomalyDetectionEnabled?: boolean;
+    unavailableDiagnosticTools?: readonly string[];
+  } = {},
 ): MoAgentModelProvider {
   const controllerStartedAt = Date.now();
   return {
@@ -662,7 +786,11 @@ export function convergentCommerceProvider(
         && options.anomalyDetectionEnabled !== false
         && hasWeeklyScan
         && healthAllowed
-        ? nextRuntimeDiagnosticDecision(ledger, controllerStartedAt)
+        ? nextRuntimeDiagnosticDecision(
+            ledger,
+            controllerStartedAt,
+            new Set(options.unavailableDiagnosticTools ?? []),
+          )
         : null;
       if (diagnosticDecision) {
         ledger.record({
@@ -866,6 +994,7 @@ export async function runCommerceAgentTurn(input: {
   signal?: AbortSignal;
   now?: () => Date;
   onEvidence?: (trace: CommerceToolTrace) => Promise<void>;
+  unavailableDiagnosticTools?: readonly string[];
 }): Promise<CommerceAgentTurnResult> {
   const question = input.question.trim();
   if (
@@ -895,10 +1024,16 @@ export async function runCommerceAgentTurn(input: {
   const declaredVirtualDate = declaredVirtualInstant
     ? catalogBusinessDate(declaredVirtualInstant)
     : null;
+  const inferredSnapshotReferenceDate = catalog.coverage.end
+    ? addCommerceBusinessDays(catalog.coverage.end, 1)
+    : wallBusinessDate;
+  const trustedSnapshotReferenceDate = declaredVirtualDate ?? inferredSnapshotReferenceDate;
+  // Coverage end is the last available fact date, not the virtual business date. Using it
+  // directly moves a Sunday-ending immutable snapshot back by a full week. A declared
+  // virtual clock wins; otherwise the first day after coverage is the conservative replay
+  // instant. Wall time still caps accidentally future-dated fixture metadata.
   const snapshotReferenceDate = catalog.coverage.dataMode === 'snapshot'
-    ? [wallBusinessDate, declaredVirtualDate, catalog.coverage.end]
-        .filter((value): value is string => Boolean(value))
-        .sort()[0] ?? wallBusinessDate
+    ? [wallBusinessDate, trustedSnapshotReferenceDate].sort()[0] ?? wallBusinessDate
     : wallBusinessDate;
   const instantForBusinessDate = (date: string): Date => {
     const noonUtc = Date.parse(`${date}T12:00:00.000Z`);
@@ -961,6 +1096,7 @@ export async function runCommerceAgentTurn(input: {
   const engine = new MoAgentRunEngine({
     provider: convergentCommerceProvider(modelRuntime.provider, ledger, question, {
       anomalyDetectionEnabled: config.anomalyDetectionEnabled,
+      unavailableDiagnosticTools: input.unavailableDiagnosticTools,
     }),
     model: modelRuntime.model,
     tools,

@@ -29,10 +29,9 @@ const requiredFiles = [
   'config/commerce-connector.olist.example.json',
   'config/commerce-connector.shopify.example.json',
   'docs/async-execution.md',
-  'docs/acceptance-status.md',
+  'docs/validation-status.md',
   'docs/connectors.md',
   'docs/e2e.md',
-  'docs/interview-guide.md',
   'docs/observability.md',
   'docs/repository-layout.md',
   'docs/release-runbook.md',
@@ -237,6 +236,7 @@ for (const requiredScript of [
   'test:performance:commerce',
   'eval:commerce:real-model',
   'eval:commerce:final-controller',
+  'eval:commerce:local-controller',
 ]) {
   if (!scripts.has(requiredScript)) errors.push(`package.json must expose ${requiredScript}.`);
 }
@@ -281,6 +281,11 @@ if (!/'final-controller-eval':\s*path\.join\(/u.test(releaseSource)
   || !releaseSource.includes('artifact.caseCount !== 100')) {
   errors.push('Formal release evidence must execute and bind the raw final-100 Controller gate.');
 }
+if (!/'local-controller-eval':\s*path\.join\(/u.test(releaseSource)
+  || !releaseSource.includes("npmArgs('run', 'eval:commerce:local-controller')")
+  || !releaseSource.includes("artifact.runtimeTurnCount !== 350")) {
+  errors.push('Local release evidence must execute and bind the Oracle-isolated Controller suite.');
+}
 if (!/'browser-e2e':\s*path\.join\(root, 'tmp', 'commerce-browser-e2e', 'report\.json'\)/u.test(releaseSource)
   || !releaseSource.includes("npmArgs('run', 'test:e2e:commerce:browser')")) {
   errors.push('Browser E2E must run in the release gate and bind its revisioned evidence report.');
@@ -298,6 +303,7 @@ for (const [checkName, environmentName] of [
   ['types', 'isolatedEnvironment'],
   ['boundary', 'isolatedEnvironment'],
   ['frozen-evaluation-assets', 'isolatedEnvironment'],
+  ['local-controller-eval', 'isolatedEnvironment'],
   ['browser-e2e', 'browserEnvironment'],
   ['postgres-integration', 'integrationEnvironment'],
   ['production-build', 'isolatedEnvironment'],

@@ -32,6 +32,7 @@
     "check:commerce-eval-assets": "node scripts/evaluation/generate-commerce-eval-assets.js --check",
     "test:commerce-eval": "vitest run src/lib/domains/commerce/agent/source-adapter.test.ts scripts/data-contract/commerce-data-contract.test.mjs scripts/checks/check-commerce-external-evidence.test.mjs scripts/evaluation/commerce-eval.test.mjs scripts/evaluation/run-commerce-final-controller-eval.test.mjs scripts/evaluation/run-commerce-real-model-eval.test.mjs scripts/evaluation/run-commerce-performance.test.mjs",
     "eval:commerce:final-controller": "node scripts/evaluation/run-commerce-final-controller-eval.js",
+    "eval:commerce:local-controller": "node scripts/evaluation/run-commerce-local-controller-eval.js",
     "eval:commerce:real-model": "node scripts/evaluation/run-commerce-real-model-eval.js",
     "test:performance:commerce": "node scripts/evaluation/run-commerce-performance.js",
     "test:connector:olist": "vitest run scripts/connectors/olist-public-source.test.mjs scripts/connectors/commerce-fixture-source.test.mjs",

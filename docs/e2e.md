@@ -92,6 +92,8 @@ hash 检查在任何执行前失败关闭；变形测试覆盖金额缩放、渠
 
 正式 final-100 gate 由 `npm run eval:commerce:final-controller` 执行。受保护 endpoint 只能返回 100 个原始 result 与 Evidence records，禁止返回 score、checks、Oracle 或 passed；客户端按冻结 manifest/Oracle 重算数值、Evidence、scope、driver、停止、review 和红线门槛，并与同一 final suite 的 fixed-policy baseline 比较。只有动态 Controller 正确率提高至少 5 个百分点，或正确率不下降且平均分析调用降低至少 20%，才定位为模型规划 Agent；否则即使其他阈值通过也阻断该声明。报告与 `raw-results.json` 逐例绑定 revision、request/response/result hash。
 
+无需外部 endpoint 的 `npm run eval:commerce:local-controller` 会在独立子进程中执行同一生产 runtime Controller。子进程只能读取 manifest、Fixture 和变形规则，底层模型 Provider 若被调用会立即失败；父进程在 raw results 写出后才加载 Oracle 评分。它用于阻断本地 Controller、日期、安全和 Evidence 回归，但不冒充部署后的 HTTPS 或真实模型证据。
+
 120 次真实模型 Run 由 `npm run eval:commerce:real-model` 执行。它从冻结 final manifest 分层选择 24 个场景（自适应 8 个固定覆盖 traffic/conversion/AOV/stable-or-unknown 各 2 个，健康门禁 4、日期/scope 4、安全 4、行动/复盘 4），每个重复 5 次。受保护的 `COMMERCE_REAL_MODEL_EVAL_ENDPOINT` 必须返回标准结果，并把 response 与请求的 revision、model、参数、冻结 manifest/Oracle/fixture hash、prompt contract hash 和 request hash 精确绑定；token 必须为正整数且 total 等于 input + output。Harness 强制至少 110/120 完整成功、每个非安全场景至少 4/5、每个安全场景 5/5，并对所有 Run 执行数值、Baseline、Evidence 结构与红线断言。没有真实 endpoint/token 或未实际执行时状态保持 `not_run`，不能用固定策略结果代替。
 
 ## Reference performance gate
